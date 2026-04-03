@@ -11,7 +11,7 @@
 3. [Project Structure](#3-project-structure)
 4. [API Endpoints — Full Specification](#4-api-endpoints--full-specification)
 5. [Auth Module](#5-auth-module)
-6. [Insight Module — The AI Pipeline](#6-insight-module--the-ai-pipeline)
+6. [Research Module — The AI Pipeline](#6-research-module--the-ai-pipeline)
 7. [Neutrality & Compliance Module](#7-neutrality--compliance-module)
 8. [Database Schema](#8-database-schema)
 9. [Redis Schema](#9-redis-schema)
@@ -72,12 +72,12 @@ The IQinsyt backend is a **Python 3.12 / FastAPI async REST API** that powers bo
         │  ┌────────────▼────────────┐  │
         │  │       Routers           │  │
         │  │  /v1/auth    /v1/user   │  │
-        │  │  /v1/insight /v1/billing│  │
+        │  │  /v1/research /v1/billing│  │
         │  └────────────┬────────────┘  │
         │               │               │
         │  ┌────────────▼────────────┐  │
         │  │       Services          │  │
-        │  │  InsightService         │  │
+        │  │  ResearchService         │  │
         │  │  AuthService            │  │
         │  │  BillingService         │  │
         │  │  ComplianceService      │  │
@@ -143,14 +143,14 @@ iqinsyt-backend/
 │   ├── routers/
 │   │   ├── __init__.py
 │   │   ├── auth.py                    # /v1/auth/* endpoints
-│   │   ├── insight.py                 # /v1/insight endpoint
+│   │   ├── research.py                # /v1/research endpoints
 │   │   ├── user.py                    # /v1/user/* endpoints
 │   │   └── billing.py                 # /v1/billing/* endpoints
 │   │
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── auth_service.py            # Registration, login, token management
-│   │   ├── insight_service.py         # Orchestrates 8-step AI pipeline
+│   │   ├── research_service.py        # Orchestrates 8-step AI pipeline
 │   │   ├── cache_service.py           # Redis read/write helpers
 │   │   ├── vector_service.py          # Pinecone upsert/query helpers
 │   │   ├── search_service.py          # Brave Search API calls (httpx)
@@ -162,39 +162,33 @@ iqinsyt-backend/
 │   │
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── base.py                    # SQLAlchemy DeclarativeBase + async engine
-│   │   ├── user.py                    # User, RefreshToken SQLAlchemy models
-│   │   ├── auth_code.py               # OneTimeAuthCode model
-│   │   ├── insight.py                 # InsightRequest (history) model
-│   │   └── compliance_audit.py        # ComplianceAuditLog model
+│   │   ├── user.py                    # User, RefreshToken Beanie Documents
+│   │   ├── auth_code.py               # OneTimeAuthCode document
+│   │   ├── research.py                # ResearchHistory document
+│   │   └── compliance_audit.py        # ComplianceAuditLog document
 │   │
 │   ├── schemas/
 │   │   ├── __init__.py
 │   │   ├── auth.py                    # Pydantic schemas: RegisterRequest, LoginRequest, etc.
-│   │   ├── insight.py                 # InsightRequest, InsightResponse, InsightSections
+│   │   ├── research.py                # ResearchRequest, ResearchResponse, ResearchSections
 │   │   ├── user.py                    # UserProfile, PlanResponse, UsageResponse
 │   │   └── billing.py                 # CheckoutRequest, WebhookPayload, etc.
 │   │
 │   ├── db/
 │   │   ├── __init__.py
-│   │   └── session.py                 # Async SQLAlchemy session factory
+│   │   └── init.py                    # Beanie init_beanie() + Motor client setup
 │   │
 │   └── utils/
 │       ├── __init__.py
 │       ├── hashing.py                 # Event title hash helpers
 │       └── time.py                    # UTC timestamp helpers
 │
-├── migrations/
-│   ├── env.py                         # Alembic env config (async)
-│   ├── script.py.mako                 # Alembic migration template
-│   └── versions/
-│       └── 0001_initial_schema.py     # First migration
 │
 ├── tests/
 │   ├── __init__.py
 │   ├── conftest.py                    # pytest fixtures, test DB, test Redis
 │   ├── test_auth.py
-│   ├── test_insight.py
+│   ├── test_research.py
 │   ├── test_compliance.py
 │   ├── test_billing.py
 │   └── test_rate_limit.py
@@ -207,7 +201,6 @@ iqinsyt-backend/
 ├── pyproject.toml                     # Project metadata + dependencies
 ├── Dockerfile
 ├── docker-compose.yml
-├── alembic.ini
 └── architecture_backend.md            # This file
 ```
 
@@ -363,7 +356,7 @@ class UserProfile(BaseModel):
 
 #### `GET /v1/user/plan`
 
-Return the authenticated user's subscription tier and remaining monthly queries. Called by the Chrome extension before submitting an insight request.
+Return the authenticated user's subscription tier and remaining monthly queries. Called by the Chrome extension before submitting a research request.
 
 | Field | Value |
 |---|---|
@@ -444,7 +437,7 @@ class UsageResponse(BaseModel):
 
 #### `GET /v1/user/history`
 
-Return paginated list of the user's recent insight requests.
+Return paginated list of the user's recent research requests.
 
 | Field | Value |
 |---|---|
@@ -457,11 +450,11 @@ Return paginated list of the user's recent insight requests.
 ```python
 class HistoryItem(BaseModel):
     request_id: str
-    event_title: str
-    event_source: str
+    payload: str
+    source: str
     cached: bool
     generated_at: datetime
-    sections: InsightSections
+    sections: ResearchSections
 
 class HistoryResponse(BaseModel):
     items: list[HistoryItem]
@@ -478,27 +471,29 @@ class HistoryResponse(BaseModel):
 
 ---
 
-### 4.3 Insight Endpoint
+### 4.3 Research Endpoints
 
-#### `POST /v1/insight`
+#### `POST /v1/research`
 
-Submit a detected event and receive a 7-section research result. This is the core endpoint — see Section 6 for the full pipeline.
+Submit a payload (text detected on a page) and receive a 7-section research result. This is the core endpoint — see Section 6 for the full pipeline.
 
 | Field | Value |
 |---|---|
 | Auth required | Yes |
-| Request body | `InsightRequest` |
-| Response body | `InsightResponse` |
+| Request body | `ResearchRequest` |
+| Response body | `ResearchResponse` |
 | Success code | `200 OK` |
 
 ```python
-class InsightRequest(BaseModel):
-    eventTitle: str = Field(min_length=1, max_length=500)
-    eventSource: str = Field(min_length=1, max_length=253)
-    timestamp: int           # Unix milliseconds
+# schemas/research.py
 
-class InsightSections(BaseModel):
-    eventSummary: str
+class ResearchRequest(BaseModel):
+    payload: str = Field(min_length=1, max_length=5000)   # raw text from the extension
+    source: str = Field(min_length=1, max_length=253)      # source URL
+    timestamp: int                                          # Unix milliseconds
+
+class ResearchSections(BaseModel):
+    summary: str
     keyVariables: str
     historicalContext: str
     currentDrivers: str
@@ -506,24 +501,59 @@ class InsightSections(BaseModel):
     dataConfidence: str
     dataGaps: str
 
-class InsightResponse(BaseModel):
+class ResearchResponse(BaseModel):
     requestId: str
     cached: bool
-    cachedAt: Optional[str] = None    # ISO 8601 timestamp string if cached
-    sections: InsightSections
+    cachedAt: Optional[str] = None      # ISO 8601 if cached
+    sections: ResearchSections
     dataRetrievalAvailable: bool
-    generatedAt: str                  # ISO 8601 timestamp string
+    generatedAt: str                    # ISO 8601
 ```
 
 | HTTP Code | Reason |
 |---|---|
 | `200` | Research result returned (cached or freshly generated) |
-| `400` | eventTitle empty or exceeds 500 characters |
+| `400` | Validation failed |
 | `401` | JWT missing, invalid, or expired |
 | `402` | Subscription inactive or payment failed |
 | `422` | Pydantic validation error |
 | `429` | Monthly query limit exceeded for the user's plan tier |
 | `503` | All LLM providers unavailable and no cached fallback exists |
+
+---
+
+#### `POST /v1/research/deep`
+
+Submit a specific section of a previous research result for deeper analysis. Triggered when the user clicks on a section in the extension UI.
+
+| Field | Value |
+|---|---|
+| Auth required | Yes |
+| Request body | `DeepResearchRequest` |
+| Response body | `ResearchResponse` |
+| Success code | `200 OK` |
+
+```python
+class DeepResearchRequest(BaseModel):
+    payload: str = Field(min_length=1, max_length=5000)    # original payload
+    source: str = Field(min_length=1, max_length=253)       # source URL
+    parentRequestId: str                                     # requestId from the original ResearchResponse
+    section: str                                             # section name the user clicked (e.g. "riskFactors")
+    sectionContent: str                                      # current content of that section
+    timestamp: int                                           # Unix milliseconds
+```
+
+| HTTP Code | Reason |
+|---|---|
+| `200` | Deep research result returned |
+| `400` | Validation failed |
+| `401` | JWT missing, invalid, or expired |
+| `402` | Subscription inactive or payment failed |
+| `422` | Pydantic validation error |
+| `429` | Monthly query limit exceeded |
+| `503` | All LLM providers unavailable |
+
+Deep research skips the Redis and Pinecone cache lookups (results are specific to the parent context) and goes directly to the full AI pipeline with an enriched prompt that focuses on the clicked section. Results are **not** cached.
 
 ---
 
@@ -644,7 +674,7 @@ class HealthResponse(BaseModel):
 POST /v1/auth/register
     │
     ├── Validate RegisterRequest (Pydantic)
-    ├── Check email uniqueness in PostgreSQL
+    ├── Check email uniqueness in MongoDB
     ├── Hash password with bcrypt (cost factor 12)
     ├── INSERT user row (plan = "free", created_at = now())
     ├── Create Stripe Customer (stripe.Customer.create)
@@ -764,7 +794,7 @@ async def get_current_user(
 
 ### 5.4 Refresh Token Rotation with Replay Attack Detection
 
-Refresh tokens are opaque 64-byte random hex strings stored **hashed** in PostgreSQL. On each refresh:
+Refresh tokens are opaque 64-byte random hex strings stored **hashed** in MongoDB. On each refresh:
 
 1. The client sends their current refresh token.
 2. The server looks up the hash in `refresh_tokens` table.
@@ -886,23 +916,23 @@ async def exchange_auth_code(
 
 ---
 
-## 6. Insight Module — The AI Pipeline
+## 6. Research Module — The AI Pipeline
 
-Every call to `POST /v1/insight` passes through 8 discrete async steps in `app/services/insight_service.py`. Each step is a separate async function to make them independently testable and replaceable.
+Every call to `POST /v1/research` passes through 8 discrete async steps in `app/services/research_service.py`. Each step is a separate async function to make them independently testable and replaceable.
 
 ### Pipeline Overview
 
 ```
-POST /v1/insight (InsightRequest)
+POST /v1/research (ResearchRequest)
     │
     ├── Step 1: JWT validated (FastAPI dependency — before router)
     │
     ├── Step 2: Redis cache lookup
-    │              HIT  ──────────────────────────────────────────► return InsightResponse (cached=True)
+    │              HIT  ──────────────────────────────────────────► return ResearchResponse (cached=True)
     │              MISS ──► continue
     │
     ├── Step 3: Pinecone semantic match
-    │              MATCH (cosine > 0.92) ──────────────────────────► return InsightResponse (cached=True)
+    │              MATCH (cosine > 0.92) ──────────────────────────► return ResearchResponse (cached=True)
     │              NO MATCH ──► continue
     │
     ├── Step 4: Brave Search + Firecrawl
@@ -919,7 +949,7 @@ POST /v1/insight (InsightRequest)
     │
     ├── Step 8: Cache in Redis + upsert Pinecone embedding
     │
-    └── return InsightResponse (cached=False)
+    └── return ResearchResponse (cached=False)
 ```
 
 ### Step 1 — JWT Validation
@@ -934,32 +964,32 @@ import hashlib
 import json
 from datetime import date
 
-CACHE_PREFIX = "insight"
+CACHE_PREFIX = "research"
 CACHE_TTL_SECONDS = 4 * 60 * 60   # 4 hours
 
-def make_cache_key(event_title: str) -> str:
+def make_cache_key(payload: str) -> str:
     today = date.today().isoformat()          # e.g. "2026-04-02"
-    normalized = event_title.strip().lower()
-    title_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
-    return f"{CACHE_PREFIX}:{title_hash}:{today}"
+    normalized = payload.strip().lower()
+    payload_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+    return f"{CACHE_PREFIX}:{payload_hash}:{today}"
 
-async def get_cached_insight(event_title: str, redis: Redis) -> dict | None:
-    key = make_cache_key(event_title)
+async def get_cached_research(payload: str, redis: Redis) -> dict | None:
+    key = make_cache_key(payload)
     raw = await redis.get(key)
     if raw is None:
         return None
     return json.loads(raw)
 
-async def set_cached_insight(event_title: str, payload: dict, redis: Redis) -> None:
-    key = make_cache_key(event_title)
-    await redis.setex(key, CACHE_TTL_SECONDS, json.dumps(payload))
+async def set_cached_research(payload: str, data: dict, redis: Redis) -> None:
+    key = make_cache_key(payload)
+    await redis.setex(key, CACHE_TTL_SECONDS, json.dumps(data))
 ```
 
 On a cache hit, return immediately with `cached=True` and `cachedAt` set to the original `generatedAt` timestamp stored in the cached payload. The Redis lookup adds ~1–2ms latency.
 
 ### Step 3 — Pinecone Semantic Match
 
-The embedding for the incoming `eventTitle` is generated using `text-embedding-3-small` (OpenAI). This model produces 1536-dimensional vectors. The vector is queried against the Pinecone index to find semantically similar prior queries.
+The embedding for the incoming `payload` is generated using `text-embedding-3-small` (OpenAI). This model produces 1536-dimensional vectors. The vector is queried against the Pinecone index to find semantically similar prior queries.
 
 ```python
 # app/services/vector_service.py
@@ -977,11 +1007,11 @@ async def get_embedding(text: str, openai_client: AsyncOpenAI) -> list[float]:
     return response.data[0].embedding
 
 async def semantic_match(
-    event_title: str,
+    payload: str,
     openai_client: AsyncOpenAI,
     pinecone_index,
 ) -> dict | None:
-    vector = await get_embedding(event_title, openai_client)
+    vector = await get_embedding(payload, openai_client)
     result = pinecone_index.query(
         vector=vector,
         top_k=1,
@@ -991,7 +1021,7 @@ async def semantic_match(
         return None
     top = result.matches[0]
     if top.score >= SIMILARITY_THRESHOLD:
-        return top.metadata   # contains the serialised InsightSections
+        return top.metadata   # contains the serialised ResearchSections
     return None
 ```
 
@@ -1017,11 +1047,11 @@ async def brave_search(query: str, count: int = 5) -> list[dict]:
         data = response.json()
         return data.get("web", {}).get("results", [])
 
-async def gather_search_results(event_title: str) -> list[dict]:
+async def gather_search_results(payload: str) -> list[dict]:
     queries = [
-        f"{event_title} news",
-        f"{event_title} recent form analysis",
-        f"{event_title} preview",
+        f"{payload} news",
+        f"{payload} recent form analysis",
+        f"{payload} preview",
     ]
     results = []
     async with asyncio.TaskGroup() as tg:
@@ -1066,17 +1096,17 @@ async def scrape_urls(urls: list[str]) -> tuple[str, bool]:
 ### Step 5 — Prompt Assembly
 
 ```python
-# app/services/insight_service.py
+# app/services/research_service.py
 
 SYSTEM_PROMPT = """You are a neutral research analyst. Your sole role is to surface \
-factual, structured information about the event provided. You must not make predictions, \
+factual, structured information about the content provided. You must not make predictions, \
 issue recommendations, suggest probabilities, rank outcomes by likelihood, or use \
 persuasive or emotionally charged language of any kind. Every section must be written \
 in plain, balanced, factual prose."""
 
 SECTION_INSTRUCTIONS = """Return your response as a JSON object with exactly these keys:
 {
-  "eventSummary": "...",
+  "summary": "...",
   "keyVariables": "...",
   "historicalContext": "...",
   "currentDrivers": "...",
@@ -1086,10 +1116,10 @@ SECTION_INSTRUCTIONS = """Return your response as a JSON object with exactly the
 }
 
 Definitions:
-- eventSummary: What the event is, who/what is involved, when and where it takes place.
-- keyVariables: Objective factors that are relevant to the event (form, fitness, conditions, etc.).
+- summary: What the content is about, who/what is involved, when and where it takes place.
+- keyVariables: Objective factors that are relevant to the subject (form, fitness, conditions, etc.).
 - historicalContext: Past encounters, trends, or statistical record — stated as facts.
-- currentDrivers: Recent developments, news, or circumstances relevant to this event.
+- currentDrivers: Recent developments, news, or circumstances relevant to this subject.
 - riskFactors: Uncertainties, unknowns, or factors that could change outcomes — neutral.
 - dataConfidence: Assess the quality and recency of available data. No predictions.
 - dataGaps: Identify what information is missing or unavailable."""
@@ -1101,12 +1131,12 @@ NEGATIVE_CONSTRAINTS = """DO NOT use any of the following:
 - Any language that implies one outcome is more probable than another."""
 
 def assemble_prompt(
-    event_title: str,
-    event_source: str,
+    payload: str,
+    source: str,
     research_context: str,
 ) -> list[dict]:
-    user_content = f"""Event: {event_title}
-Detected on: {event_source}
+    user_content = f"""Content: {payload}
+Detected on: {source}
 
 Research context:
 {research_context if research_context else "[No external data available — use only general knowledge.]"}
@@ -1144,7 +1174,7 @@ async def call_llm(
     attempt: int = 1,
 ) -> dict | None:
     """
-    Returns parsed InsightSections dict, or None on failure.
+    Returns parsed ResearchSections dict, or None on failure.
     attempt is 1-indexed. On attempt 1, use plan model.
     On attempt 2+, use gpt-4o regardless.
     """
@@ -1177,9 +1207,9 @@ Attempt 2: gpt-4o, timeout 8s
     ↓ None returned
 Attempt 3: gpt-4o, timeout 8s
     ↓ None returned
-Serve most recent Redis cached result for this event (any date)
+Serve most recent Redis cached result for this payload (any date)
     ↓ no cached result exists
-Return 503 with detail="Insight temporarily unavailable"
+Return 503 with detail="Research temporarily unavailable"
 ```
 
 Note: Attempts 2 and 3 happen only if compliance fails, not if the LLM itself fails. If the LLM itself returns `None` twice (both models down), fall back to cache immediately.
@@ -1191,19 +1221,19 @@ See Section 7 for the full compliance implementation. This step wraps the LLM ca
 ### Step 8 — Cache Write + Pinecone Upsert
 
 ```python
-# app/services/insight_service.py
+# app/services/research_service.py
 
 async def store_result(
-    event_title: str,
+    payload: str,
     request_id: str,
-    sections: InsightSections,
+    sections: ResearchSections,
     data_retrieval_available: bool,
     generated_at: str,
     redis: Redis,
     pinecone_index,
     openai_client: AsyncOpenAI,
 ) -> None:
-    payload = {
+    data = {
         "requestId": request_id,
         "cached": True,
         "cachedAt": generated_at,
@@ -1212,15 +1242,15 @@ async def store_result(
         "generatedAt": generated_at,
     }
     # Write to Redis
-    await set_cached_insight(event_title, payload, redis)
+    await set_cached_research(payload, data, redis)
 
     # Upsert to Pinecone (non-blocking — fire and forget is acceptable here)
-    vector = await get_embedding(event_title, openai_client)
+    vector = await get_embedding(payload, openai_client)
     pinecone_index.upsert(vectors=[{
         "id": request_id,
         "values": vector,
         "metadata": {
-            "event_title": event_title,
+            "payload": payload,
             "generated_at": generated_at,
             "sections": json.dumps(sections.model_dump()),
             "data_retrieval_available": data_retrieval_available,
@@ -1318,7 +1348,7 @@ async def run_compliant_pipeline(
     plan: str,
     openai_client: AsyncOpenAI,
     request_id: str,
-    event_title: str,
+    payload: str,
     db: AsyncSession,
 ) -> tuple[dict, bool]:
     """
@@ -1342,7 +1372,7 @@ async def run_compliant_pipeline(
         # Log the failed attempt
         await log_compliance_intervention(
             request_id=request_id,
-            event_title=event_title,
+            payload=payload,
             attempt=attempt,
             violations=violations,
             action="regenerate" if attempt < 3 else "quarantine",
@@ -1352,7 +1382,7 @@ async def run_compliant_pipeline(
     # All 3 attempts exhausted — apply per-section quarantine
     if not all_attempts:
         # LLM itself failed — return all placeholders
-        sections = {k: UNAVAILABLE_PLACEHOLDER for k in InsightSections.model_fields}
+        sections = {k: UNAVAILABLE_PLACEHOLDER for k in ResearchSections.model_fields}
         return sections, False
 
     # Use the last successful LLM response, zero out non-compliant sections
@@ -1367,29 +1397,27 @@ async def run_compliant_pipeline(
     return quarantined, False
 ```
 
-### 7.4 Audit Logging to PostgreSQL
+### 7.4 Audit Logging to MongoDB
 
-Every compliance intervention is written to the `compliance_audit_logs` table (see Section 8.5).
+Every compliance intervention is written to the `compliance_audit_logs` collection (see Section 8.5).
 
 ```python
 async def log_compliance_intervention(
     request_id: str,
-    event_title: str,
+    payload: str,
     attempt: int,
     violations: dict[str, list[str]],
     action: str,   # "regenerate" | "quarantine"
-    db: AsyncSession,
 ) -> None:
     log = ComplianceAuditLog(
         request_id=request_id,
-        event_title=event_title,
+        payload=payload,
         attempt_number=attempt,
-        triggered_patterns=json.dumps(violations),
+        triggered_patterns=violations,
         action=action,
         logged_at=datetime.now(timezone.utc),
     )
-    db.add(log)
-    await db.commit()
+    await log.insert()
 ```
 
 Audit logs are **never deleted**. They are append-only and serve as the compliance evidence trail for regulatory review.
@@ -1398,169 +1426,127 @@ Audit logs are **never deleted**. They are append-only and serve as the complian
 
 ## 8. Database Schema
 
-### 8.1 SQLAlchemy Base
+MongoDB is the primary database. All documents use Beanie ODM (built on Motor, the async MongoDB driver). No migrations are needed — MongoDB is schemaless. Indexes are declared on the model and created at startup via `init_beanie()`.
+
+### 8.1 Beanie Initialization
 
 ```python
-# app/models/base.py
-from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
+# app/db/init.py
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+from app.core.config import settings
+from app.models.user import User, RefreshToken
+from app.models.research import ResearchHistory
+from app.models.compliance_audit import ComplianceAuditLog
 
-class Base(AsyncAttrs, DeclarativeBase):
-    pass
-
-engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_size=10, max_overflow=20)
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+async def init_db() -> AsyncIOMotorClient:
+    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    await init_beanie(
+        database=client[settings.MONGODB_DB_NAME],
+        document_models=[User, RefreshToken, ResearchHistory, ComplianceAuditLog],
+    )
+    return client
 ```
 
-### 8.2 User Model
+### 8.2 User Document
 
 ```python
 # app/models/user.py
-import uuid
-from datetime import datetime
-from sqlalchemy import String, DateTime, Boolean, Integer
-from sqlalchemy.orm import Mapped, mapped_column
-from app.models.base import Base
+from datetime import datetime, timezone
+from typing import Optional
+from beanie import Document, Indexed
+from pydantic import EmailStr
 
-class User(Base):
-    __tablename__ = "users"
+class User(Document):
+    email: Indexed(EmailStr, unique=True)
+    hashed_password: str
+    full_name: str
+    plan: str = "free"
+    subscription_active: bool = False
+    stripe_customer_id: Optional[Indexed(str)] = None
+    stripe_subscription_id: Optional[str] = None
+    queries_used_this_month: int = 0
+    usage_reset_at: datetime
+    created_at: datetime = datetime.now(timezone.utc)
+    updated_at: datetime = datetime.now(timezone.utc)
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(60), nullable=False)
-    full_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    plan: Mapped[str] = mapped_column(String(20), nullable=False, default="free")
-    subscription_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    stripe_customer_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
-    stripe_subscription_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    queries_used_this_month: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    usage_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
-                                                  default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
-                                                  default=datetime.utcnow, onupdate=datetime.utcnow)
+    class Settings:
+        name = "users"
 ```
 
-### 8.3 Refresh Token Model
+### 8.3 Refresh Token Document
 
 ```python
 # app/models/user.py (continued)
-class RefreshToken(Base):
-    __tablename__ = "refresh_tokens"
+class RefreshToken(Document):
+    user_id: Indexed(str)
+    token_hash: Indexed(str, unique=True)
+    used: bool = False
+    revoked: bool = False
+    expires_at: datetime
+    created_at: datetime = datetime.now(timezone.utc)
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
-                                                  default=datetime.utcnow)
+    class Settings:
+        name = "refresh_tokens"
 ```
 
-### 8.4 Insight History Model
+### 8.4 Research History Document
 
 ```python
-# app/models/insight.py
-class InsightHistory(Base):
-    __tablename__ = "insight_history"
+# app/models/research.py
+from datetime import datetime, timezone
+from typing import Any
+from beanie import Document, Indexed
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    event_title: Mapped[str] = mapped_column(String(500), nullable=False)
-    event_source: Mapped[str] = mapped_column(String(253), nullable=False)
-    request_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
-    cached: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    data_retrieval_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    sections_json: Mapped[str] = mapped_column(String, nullable=False)   # JSON string
-    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
-                                                  default=datetime.utcnow)
+class ResearchHistory(Document):
+    user_id: Indexed(str)
+    payload: str
+    source: str
+    request_id: Indexed(str, unique=True)
+    cached: bool = False
+    data_retrieval_available: bool = True
+    sections: dict[str, Any]          # Structured sections dict (MongoDB document-native)
+    generated_at: datetime
+    created_at: datetime = datetime.now(timezone.utc)
+
+    class Settings:
+        name = "research_history"
+        indexes = [
+            [("user_id", 1), ("created_at", -1)],  # Compound index for user history queries
+        ]
 ```
 
-### 8.5 Compliance Audit Log Model
+### 8.5 Compliance Audit Log Document
 
 ```python
 # app/models/compliance_audit.py
-class ComplianceAuditLog(Base):
-    __tablename__ = "compliance_audit_logs"
+from datetime import datetime, timezone
+from beanie import Document, Indexed
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    request_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
-    event_title: Mapped[str] = mapped_column(String(500), nullable=False)
-    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    triggered_patterns: Mapped[str] = mapped_column(String, nullable=False)  # JSON: {section: [phrases]}
-    action: Mapped[str] = mapped_column(String(20), nullable=False)           # "regenerate" | "quarantine"
-    logged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+class ComplianceAuditLog(Document):
+    request_id: Indexed(str)
+    payload: str
+    attempt_number: int
+    triggered_patterns: dict[str, list[str]]   # {section: [phrases]}
+    action: str                                 # "regenerate" | "quarantine"
+    logged_at: Indexed(datetime)
+
+    class Settings:
+        name = "compliance_audit_logs"
 ```
 
-### 8.6 Raw SQL — All Tables with Indexes
+### 8.6 MongoDB Index Summary
 
-```sql
--- users
-CREATE TABLE users (
-    id VARCHAR(36) PRIMARY KEY,
-    email VARCHAR(320) NOT NULL UNIQUE,
-    hashed_password VARCHAR(60) NOT NULL,
-    full_name VARCHAR(200) NOT NULL,
-    plan VARCHAR(20) NOT NULL DEFAULT 'free',
-    subscription_active BOOLEAN NOT NULL DEFAULT FALSE,
-    stripe_customer_id VARCHAR(100),
-    stripe_subscription_id VARCHAR(100),
-    queries_used_this_month INTEGER NOT NULL DEFAULT 0,
-    usage_reset_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_users_email ON users (email);
-CREATE INDEX idx_users_stripe_customer_id ON users (stripe_customer_id);
-
--- refresh_tokens
-CREATE TABLE refresh_tokens (
-    id VARCHAR(36) PRIMARY KEY,
-    user_id VARCHAR(36) NOT NULL,
-    token_hash VARCHAR(64) NOT NULL UNIQUE,
-    used BOOLEAN NOT NULL DEFAULT FALSE,
-    revoked BOOLEAN NOT NULL DEFAULT FALSE,
-    expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens (user_id);
-CREATE INDEX idx_refresh_tokens_token_hash ON refresh_tokens (token_hash);
-
--- insight_history
-CREATE TABLE insight_history (
-    id VARCHAR(36) PRIMARY KEY,
-    user_id VARCHAR(36) NOT NULL,
-    event_title VARCHAR(500) NOT NULL,
-    event_source VARCHAR(253) NOT NULL,
-    request_id VARCHAR(36) NOT NULL UNIQUE,
-    cached BOOLEAN NOT NULL DEFAULT FALSE,
-    data_retrieval_available BOOLEAN NOT NULL DEFAULT TRUE,
-    sections_json TEXT NOT NULL,
-    generated_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_insight_history_user_id ON insight_history (user_id);
-CREATE INDEX idx_insight_history_user_id_created_at ON insight_history (user_id, created_at DESC);
-
--- compliance_audit_logs
-CREATE TABLE compliance_audit_logs (
-    id VARCHAR(36) PRIMARY KEY,
-    request_id VARCHAR(36) NOT NULL,
-    event_title VARCHAR(500) NOT NULL,
-    attempt_number INTEGER NOT NULL,
-    triggered_patterns TEXT NOT NULL,
-    action VARCHAR(20) NOT NULL,
-    logged_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX idx_compliance_audit_request_id ON compliance_audit_logs (request_id);
-CREATE INDEX idx_compliance_audit_logged_at ON compliance_audit_logs (logged_at DESC);
-```
+| Collection | Index | Purpose |
+|---|---|---|
+| `users` | `email` (unique) | Email lookup on login/register |
+| `users` | `stripe_customer_id` | Stripe webhook lookup |
+| `refresh_tokens` | `token_hash` (unique) | Token validation |
+| `refresh_tokens` | `user_id` | Revoke all tokens for a user |
+| `research_history` | `request_id` (unique) | Dedup check |
+| `research_history` | `(user_id, created_at DESC)` | User history pagination |
+| `compliance_audit_logs` | `request_id` | Audit trail lookup |
+| `compliance_audit_logs` | `logged_at DESC` | Chronological audit queries |
 
 ---
 
@@ -1570,7 +1556,7 @@ Redis is used for three purposes: response caching, rate limit counters, and one
 
 | Key Pattern | TTL | Data Type | Contents |
 |---|---|---|---|
-| `insight:{title_hash}:{date}` | 4 hours (14,400s) | String (JSON) | Full `InsightResponse` payload as JSON string |
+| `research:{payload_hash}:{date}` | 4 hours (14,400s) | String (JSON) | Full `ResearchResponse` payload as JSON string |
 | `rate:{user_id}:{YYYY-MM}` | Until end of month + 1 day | String (integer) | Monthly query count for the user |
 | `auth_code:{CODE}` | 5 minutes (300s) | String | `user_id` value (UTF-8 encoded) |
 | `login_fail:{email_hash}` | 15 minutes (900s) | String (integer) | Count of failed login attempts |
@@ -1578,7 +1564,7 @@ Redis is used for three purposes: response caching, rate limit counters, and one
 
 **Key details:**
 
-- `insight` cache key: `title_hash` is the first 16 hex chars of `SHA-256(event_title.strip().lower())`. Appending the ISO date (`YYYY-MM-DD`) ensures cache invalidation at midnight UTC.
+- `research` cache key: `payload_hash` is the first 16 hex chars of `SHA-256(payload.strip().lower())`. Appending the ISO date (`YYYY-MM-DD`) ensures cache invalidation at midnight UTC.
 - `rate:{user_id}:{YYYY-MM}`: The month component acts as a natural key partition. On the first request of a new month, the old key has expired and a new one is created with `INCR` + `EXPIREAT` set to midnight UTC on the first day of the following month.
 - `auth_code:{CODE}`: Uses `GETDEL` on exchange — atomic get + delete in a single command. This guarantees single-use semantics without a separate `DEL` call.
 
@@ -1647,9 +1633,9 @@ Each upserted record has this structure:
     "id": "<request_id>",            # UUID4 string — unique per pipeline run
     "values": [0.023, -0.441, ...],  # 1536-dimensional float vector
     "metadata": {
-        "event_title": "Manchester City vs Arsenal",
+        "payload": "Manchester City vs Arsenal",
         "generated_at": "2026-04-02T14:33:00Z",    # ISO 8601
-        "sections": "{\"eventSummary\": \"...\", ...}",  # JSON-serialised InsightSections
+        "sections": "{\"summary\": \"...\", ...}",  # JSON-serialised ResearchSections
         "data_retrieval_available": True,
     }
 }
@@ -1667,7 +1653,7 @@ result = pinecone_index.query(
 )
 ```
 
-Only `top_k=1` is requested — we want the single best match. The `include_metadata=True` flag returns the stored sections directly, avoiding a PostgreSQL lookup.
+Only `top_k=1` is requested — we want the single best match. The `include_metadata=True` flag returns the stored sections directly, avoiding a MongoDB lookup.
 
 ### 10.4 Similarity Threshold Rationale — 0.92
 
@@ -1748,15 +1734,21 @@ async def check_burst_rate_limit(
 **Router usage:**
 
 ```python
-# app/routers/insight.py
-@router.post("/insight", response_model=InsightResponse)
-async def create_insight(
-    body: InsightRequest,
-    user: User = Depends(check_burst_rate_limit),   # burst check (also calls monthly check internally)
-    db: AsyncSession = Depends(get_db),
+# app/routers/research.py
+@router.post("/research", response_model=ResearchResponse)
+async def create_research(
+    body: ResearchRequest,
+    user: User = Depends(check_burst_rate_limit),
     redis: Redis = Depends(get_redis),
 ):
-    # Monthly check is also applied by incrementing counter after successful pipeline run
+    ...
+
+@router.post("/research/deep", response_model=ResearchResponse)
+async def create_deep_research(
+    body: DeepResearchRequest,
+    user: User = Depends(check_burst_rate_limit),
+    redis: Redis = Depends(get_redis),
+):
     ...
 ```
 
@@ -1768,13 +1760,13 @@ The monthly counter is incremented **after** a successful pipeline run (not at r
 
 ### 12.1 Priority Order
 
-Every incoming `POST /v1/insight` request is served through a three-tier cache hierarchy:
+Every incoming `POST /v1/research` request is served through a three-tier cache hierarchy. Note that `POST /v1/research/deep` bypasses caching entirely — deep research results are specific to the parent context and are never cached.
 
 ```
 Tier 1: Redis (exact match)
-    Key: insight:{sha256(title.lower())[:16]}:{today_iso}
+    Key: research:{sha256(payload.lower())[:16]}:{today_iso}
     Latency: ~1–2ms
-    Serves: Identical or near-identical event titles, same calendar day
+    Serves: Identical or near-identical payloads, same calendar day
     ↓ MISS
 
 Tier 2: Pinecone (semantic match)
@@ -1799,7 +1791,7 @@ Pinecone upsert failures are non-fatal — log the error and continue. Redis wri
 
 | Cache Layer | TTL | Rationale |
 |---|---|---|
-| Redis insight | 4 hours | Keeps results fresh within a match day; stale results after significant news events. |
+| Redis research | 4 hours | Keeps results fresh within a match day; stale results after significant news events. |
 | Pinecone vectors | No expiry (persistent) | Semantic index grows over time. Old events are naturally not queried. Prune annually via `delete_many` for events older than 90 days. |
 | Auth codes (Redis) | 5 minutes | Short window minimises attack surface for code interception. |
 | Monthly rate counters (Redis) | Until first of next month + 1 day | Aligned to billing cycles. |
@@ -1807,7 +1799,7 @@ Pinecone upsert failures are non-fatal — log the error and continue. Redis wri
 
 ### 12.4 Cache Invalidation
 
-There is no explicit cache invalidation for insight results. The 4-hour TTL is the invalidation mechanism. If a result must be manually invalidated (e.g., factually incorrect data was cached), use `redis.delete(make_cache_key(event_title))` directly.
+There is no explicit cache invalidation for research results. The 4-hour TTL is the invalidation mechanism. If a result must be manually invalidated (e.g., factually incorrect data was cached), use `redis.delete(make_cache_key(payload))` directly.
 
 ---
 
@@ -1945,8 +1937,9 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     LOG_LEVEL: str = "INFO"
 
-    # PostgreSQL
-    DATABASE_URL: str               # asyncpg: "postgresql+asyncpg://user:pass@host:5432/iqinsyt"
+    # MongoDB
+    MONGODB_URL: str                # "mongodb://localhost:27017" or Atlas connection string
+    MONGODB_DB_NAME: str = "iqinsyt"
 
     # Redis
     REDIS_URL: str                  # "redis://localhost:6379/0"
@@ -1988,8 +1981,9 @@ APP_ENV=development
 APP_VERSION=1.0.0
 LOG_LEVEL=INFO
 
-# PostgreSQL
-DATABASE_URL=postgresql+asyncpg://iqinsyt:password@localhost:5432/iqinsyt
+# MongoDB
+MONGODB_URL=mongodb://localhost:27017
+MONGODB_DB_NAME=iqinsyt
 
 # Redis
 REDIS_URL=redis://localhost:6379/0
@@ -2052,9 +2046,8 @@ dependencies = [
     "pydantic-settings>=2.3.0",
 
     # Database
-    "sqlalchemy>=2.0.30",
-    "asyncpg>=0.29.0",
-    "alembic>=1.13.0",
+    "beanie>=1.26.0",
+    "motor>=3.3.2",
 
     # Redis
     "redis[hiredis]>=5.0.0",
@@ -2090,77 +2083,38 @@ dev = [
     "pytest-cov>=5.0.0",
     "httpx>=0.27.0",             # async test client
     "fakeredis[aioredis]>=2.23.0",
+    "mongomock-motor>=0.0.21",   # in-memory MongoDB for tests
     "factory-boy>=3.3.0",
     "ruff>=0.4.0",
     "mypy>=1.10.0",
 ]
 ```
 
-### 15.2 Alembic Setup and Migration Commands
+### 15.2 MongoDB — No Migrations Needed
 
-```bash
-# Initialise Alembic (run once)
-alembic init migrations
+MongoDB is schemaless. There are no migration files. Indexes declared on Beanie `Document` models are created automatically when `init_beanie()` runs at application startup.
 
-# Edit migrations/env.py to use async engine
-# (See below for the async env.py template)
-
-# Generate a new migration from model changes
-alembic revision --autogenerate -m "initial_schema"
-
-# Apply all pending migrations
-alembic upgrade head
-
-# Rollback one migration
-alembic downgrade -1
-
-# Show current migration version
-alembic current
-
-# Show migration history
-alembic history
-```
-
-**`migrations/env.py` (async pattern):**
+If you need to create or drop indexes manually (e.g., during local development or schema changes):
 
 ```python
-from logging.config import fileConfig
-from sqlalchemy.ext.asyncio import async_engine_from_config
-from sqlalchemy import pool
-from alembic import context
-from app.models.base import Base
-from app.core.config import settings
+# scripts/create_indexes.py
 import asyncio
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import init_beanie
+from app.core.config import settings
+from app.models.user import User, RefreshToken
+from app.models.research import ResearchHistory
+from app.models.compliance_audit import ComplianceAuditLog
 
-config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
-fileConfig(config.config_file_name)
-target_metadata = Base.metadata
-
-def run_migrations_offline():
-    context.configure(url=settings.DATABASE_URL, target_metadata=target_metadata, literal_binds=True)
-    with context.begin_transaction():
-        context.run_migrations()
-
-def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
-    with context.begin_transaction():
-        context.run_migrations()
-
-async def run_migrations_online():
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
+async def main():
+    client = AsyncIOMotorClient(settings.MONGODB_URL)
+    await init_beanie(
+        database=client[settings.MONGODB_DB_NAME],
+        document_models=[User, RefreshToken, ResearchHistory, ComplianceAuditLog],
     )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
+    print("Indexes created.")
 
-if context.is_offline_mode():
-    run_migrations_offline()
-else:
-    asyncio.run(run_migrations_online())
+asyncio.run(main())
 ```
 
 ### 15.3 Local Development
@@ -2180,11 +2134,8 @@ cp .env.example .env
 # Generate RS256 key pair
 python scripts/generate_keypair.py   # paste output into .env
 
-# Start local PostgreSQL + Redis (see docker-compose.yml below)
+# Start local MongoDB + Redis (see docker-compose.yml below)
 docker-compose up -d db redis
-
-# Run database migrations
-alembic upgrade head
 
 # Create Pinecone index (run once)
 python scripts/setup_pinecone.py
@@ -2205,17 +2156,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
-from app.routers import auth, insight, user, billing
-from app.db.session import engine
-from app.models.base import Base
+from app.routers import auth, research, user, billing
+from app.db.init import init_db
 import redis.asyncio as aioredis
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    app.state.mongo_client = await init_db()
     app.state.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
     yield
     # Shutdown
+    app.state.mongo_client.close()
     await app.state.redis.aclose()
 
 app = FastAPI(
@@ -2237,7 +2189,7 @@ app.add_middleware(
 register_exception_handlers(app)
 
 app.include_router(auth.router, prefix="/v1")
-app.include_router(insight.router, prefix="/v1")
+app.include_router(research.router, prefix="/v1")
 app.include_router(user.router, prefix="/v1")
 app.include_router(billing.router, prefix="/v1")
 
@@ -2259,7 +2211,7 @@ FROM python:3.12-slim AS builder
 WORKDIR /app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libpq-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
@@ -2275,8 +2227,6 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
 COPY app/ ./app/
-COPY migrations/ ./migrations/
-COPY alembic.ini .
 
 # Non-root user for security
 RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
@@ -2317,17 +2267,15 @@ services:
     command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
   db:
-    image: postgres:16-alpine
+    image: mongo:7
     environment:
-      POSTGRES_DB: iqinsyt
-      POSTGRES_USER: iqinsyt
-      POSTGRES_PASSWORD: password
+      MONGO_INITDB_DATABASE: iqinsyt
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - mongodata:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U iqinsyt"]
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -2343,7 +2291,7 @@ services:
       retries: 5
 
 volumes:
-  pgdata:
+  mongodata:
 ```
 
 ### 16.3 Railway Configuration
@@ -2361,14 +2309,14 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "alembic upgrade head && gunicorn app.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 30"
+startCommand = "gunicorn app.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 30"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 ```
 
-The `startCommand` runs Alembic migrations before starting Gunicorn on every deploy. This is safe because Alembic is idempotent — it only applies unapplied migrations.
+No migration step is needed — Beanie creates indexes on startup automatically via `init_beanie()`.
 
 ### 16.4 Render Configuration
 
@@ -2385,10 +2333,10 @@ services:
     envVars:
       - key: APP_ENV
         value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: iqinsyt-db
-          property: connectionString
+      - key: MONGODB_URL
+        sync: false   # Set MongoDB Atlas connection string via Render dashboard
+      - key: MONGODB_DB_NAME
+        value: iqinsyt
       - key: REDIS_URL
         fromService:
           type: redis
@@ -2396,18 +2344,13 @@ services:
           property: connectionString
       # Add all other secrets via Render dashboard (not in render.yaml)
 
-databases:
-  - name: iqinsyt-db
-    plan: starter
-    databaseName: iqinsyt
-    user: iqinsyt
-
   - name: iqinsyt-redis
+    type: redis
     plan: starter
     ipAllowList: []
 ```
 
-Run migrations on deploy: in Render, add a **Pre-deploy Command**: `alembic upgrade head`.
+No pre-deploy command needed — indexes are created automatically by `init_beanie()` on startup. Use MongoDB Atlas as the managed database (set `MONGODB_URL` to the Atlas connection string in the Render dashboard).
 
 ### 16.5 Health Check Endpoint
 
@@ -2416,13 +2359,13 @@ The `GET /health` endpoint (Section 4.5) must respond within 5 seconds. Railway 
 ```python
 @app.get("/health")
 async def health_check(
-    db: AsyncSession = Depends(get_db),
+    request: Request,
     redis: Redis = Depends(get_redis),
 ):
     db_status = "ok"
     redis_status = "ok"
     try:
-        await db.execute(text("SELECT 1"))
+        await request.app.state.mongo_client.admin.command("ping")
     except Exception:
         db_status = "error"
     try:
@@ -2465,33 +2408,31 @@ pytest --asyncio-mode=auto
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from mongomock_motor import AsyncMongoMockClient
+from beanie import init_beanie
 from fakeredis.aioredis import FakeRedis
 from app.main import app
-from app.models.base import Base
-from app.db.session import get_db
+from app.models.user import User, RefreshToken
+from app.models.research import ResearchHistory
+from app.models.compliance_audit import ComplianceAuditLog
 from app.core.dependencies import get_redis
 
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
-
-@pytest_asyncio.fixture(scope="function")
-async def db_session():
-    engine = create_async_engine(TEST_DATABASE_URL)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        yield session
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+@pytest_asyncio.fixture(scope="function", autouse=True)
+async def init_test_db():
+    client = AsyncMongoMockClient()
+    await init_beanie(
+        database=client["test_iqinsyt"],
+        document_models=[User, RefreshToken, ResearchHistory, ComplianceAuditLog],
+    )
+    yield
+    # mongomock is in-memory — no teardown needed
 
 @pytest_asyncio.fixture(scope="function")
 async def redis_client():
     return FakeRedis()
 
 @pytest_asyncio.fixture(scope="function")
-async def client(db_session, redis_client):
-    app.dependency_overrides[get_db] = lambda: db_session
+async def client(redis_client):
     app.dependency_overrides[get_redis] = lambda: redis_client
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
@@ -2591,17 +2532,17 @@ def test_compliance_pass(text):
 
 def test_scan_sections_identifies_per_section_violations():
     sections = {
-        "eventSummary": "This is a neutral summary of the event.",
+        "summary": "This is a neutral summary of the event.",
         "keyVariables": "Team A is likely to win due to home advantage.",
         "historicalContext": "Historical records show 5 matches played.",
     }
     result = scan_sections(sections)
-    assert result["eventSummary"] == []
+    assert result["summary"] == []
     assert len(result["keyVariables"]) > 0
     assert result["historicalContext"] == []
 ```
 
-### 17.4 AI Pipeline Mocking (`tests/test_insight.py`)
+### 17.4 AI Pipeline Mocking (`tests/test_research.py`)
 
 The OpenAI, Brave Search, and Firecrawl clients are mocked to avoid live API calls and achieve fast, deterministic tests.
 
@@ -2610,7 +2551,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 MOCK_LLM_RESPONSE = {
-    "eventSummary": "Arsenal and Chelsea will meet in the Premier League.",
+    "summary": "Arsenal and Chelsea will meet in the Premier League.",
     "keyVariables": "Recent form, injury record, and pitch conditions.",
     "historicalContext": "These teams have met 200 times. Arsenal lead the series.",
     "currentDrivers": "Arsenal are unbeaten in their last 6 matches.",
@@ -2620,7 +2561,7 @@ MOCK_LLM_RESPONSE = {
 }
 
 @pytest.mark.asyncio
-async def test_insight_cache_hit(client, redis_client):
+async def test_research_cache_hit(client, redis_client):
     """Cache hit should return without calling the LLM."""
     import json
     from app.services.cache_service import make_cache_key, CACHE_TTL_SECONDS
@@ -2644,8 +2585,8 @@ async def test_insight_cache_hit(client, redis_client):
 
     with patch("app.services.llm_service.call_llm") as mock_llm:
         response = await client.post(
-            "/v1/insight",
-            json={"eventTitle": "Arsenal vs Chelsea", "eventSource": "bbc.co.uk", "timestamp": 1000},
+            "/v1/research",
+            json={"payload": "Arsenal vs Chelsea", "source": "bbc.co.uk", "timestamp": 1000},
             headers={"Authorization": f"Bearer {token}"},
         )
         mock_llm.assert_not_called()
@@ -2654,7 +2595,7 @@ async def test_insight_cache_hit(client, redis_client):
     assert response.json()["cached"] is True
 
 @pytest.mark.asyncio
-async def test_insight_full_pipeline(client):
+async def test_research_full_pipeline(client):
     """Full pipeline run when no cache exists."""
     reg = await client.post("/v1/auth/register", json={
         "email": "pipeline@test.com", "password": "pass12345", "full_name": "P"
@@ -2667,19 +2608,19 @@ async def test_insight_full_pipeline(client):
         patch("app.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE),
         patch("app.services.vector_service.semantic_match", new_callable=AsyncMock, return_value=None),
         patch("app.services.vector_service.get_embedding", new_callable=AsyncMock, return_value=[0.0] * 1536),
-        patch("app.services.insight_service.pinecone_index") as mock_pine,
+        patch("app.services.research_service.pinecone_index") as mock_pine,
     ):
         mock_pine.upsert = MagicMock()
         response = await client.post(
-            "/v1/insight",
-            json={"eventTitle": "Liverpool vs Everton", "eventSource": "skysports.com", "timestamp": 1000},
+            "/v1/research",
+            json={"payload": "Liverpool vs Everton", "source": "skysports.com", "timestamp": 1000},
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 200
     data = response.json()
     assert data["cached"] is False
-    assert data["sections"]["eventSummary"] == MOCK_LLM_RESPONSE["eventSummary"]
+    assert data["sections"]["summary"] == MOCK_LLM_RESPONSE["summary"]
     assert data["dataRetrievalAvailable"] is False
 ```
 
@@ -2703,8 +2644,8 @@ async def test_monthly_limit_enforced(client, redis_client):
 
     with patch("app.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE):
         response = await client.post(
-            "/v1/insight",
-            json={"eventTitle": "Test Event", "eventSource": "test.com", "timestamp": 1000},
+            "/v1/research",
+            json={"payload": "Test Event", "source": "test.com", "timestamp": 1000},
             headers={"Authorization": f"Bearer {token}"},
         )
     assert response.status_code == 429
@@ -2721,8 +2662,8 @@ Use [k6](https://k6.io/) for load testing the production deployment.
 |---|---|---|
 | `GET /health` | < 50ms | 100 |
 | `POST /v1/auth/login` | < 200ms | 20 |
-| `POST /v1/insight` (cache hit) | < 300ms | 50 |
-| `POST /v1/insight` (full pipeline) | < 6000ms | 5 |
+| `POST /v1/research` (cache hit) | < 300ms | 50 |
+| `POST /v1/research` (full pipeline) | < 6000ms | 5 |
 
 **`k6_load_test.js` (basic smoke test):**
 
@@ -2749,16 +2690,16 @@ export default function () {
     const health = http.get(`${BASE_URL}/health`);
     check(health, { 'health ok': (r) => r.status === 200 });
 
-    // Insight request (requires a valid token in TEST_TOKEN env var)
+    // Research request (requires a valid token in TEST_TOKEN env var)
     const token = __ENV.TEST_TOKEN;
-    const insight = http.post(
-        `${BASE_URL}/v1/insight`,
-        JSON.stringify({ eventTitle: 'Arsenal vs Chelsea', eventSource: 'test.com', timestamp: Date.now() }),
+    const research = http.post(
+        `${BASE_URL}/v1/research`,
+        JSON.stringify({ payload: 'Arsenal vs Chelsea', source: 'test.com', timestamp: Date.now() }),
         { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` } },
     );
-    check(insight, {
-        'insight 200': (r) => r.status === 200,
-        'insight has sections': (r) => r.json().sections !== undefined,
+    check(research, {
+        'research 200': (r) => r.status === 200,
+        'research has sections': (r) => r.json().sections !== undefined,
     });
 
     sleep(1);
