@@ -42,7 +42,7 @@ The IQinsyt backend is a **Python 3.12 / FastAPI async REST API** that powers bo
 - Not a search engine (it delegates search to Brave)
 - Not responsible for rendering UI — it returns JSON only
 - Not a real-time streaming service — all responses are synchronous JSON payloads
-- Not a stateful session server — all state lives in PostgreSQL, Redis, or Pinecone
+- Not a stateful session server — all state lives in MongoDB, Redis, or Pinecone
 
 ---
 
@@ -88,7 +88,7 @@ The IQinsyt backend is a **Python 3.12 / FastAPI async REST API** that powers bo
         │               │  EXTERNAL SERVICES               │
         │               │                                  │
         │    ┌──────────▼──────────┐                       │
-        │    │    PostgreSQL        │  Users, tokens,       │
+        │    │    MongoDB           │  Users, tokens,       │
         │    │    (primary DB)      │  history, audit log   │
         │    └─────────────────────┘                       │
         │                                                  │
