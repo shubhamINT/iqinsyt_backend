@@ -201,7 +201,7 @@ iqinsyt-backend/
 │   ├── schemas/
 │   │   ├── __init__.py
 │   │   ├── auth.py                    # Pydantic schemas: RegisterRequest, LoginRequest, etc.
-│   │   ├── research.py                # ResearchRequest, ResearchResponse, ResearchSections
+│   │   ├── research.py                # ResearchRequest, ResearchSections
 │   │   ├── user.py                    # UserProfile, PlanResponse, UsageResponse
 │   │   └── billing.py                 # CheckoutRequest, WebhookPayload, etc.
 │   │
@@ -512,7 +512,7 @@ Submit a payload (text detected on a page) and receive a 7-section research resu
 |---|---|
 | Auth required | Yes |
 | Request body | `ResearchRequest` |
-| Response body | `APIResponse[ResearchResponse]` |
+| Response body | `APIResponse` |
 | Success code | `200 OK` |
 
 ```python
@@ -532,12 +532,14 @@ class ResearchSections(BaseModel):
     dataConfidence: str
     dataGaps: str
 
-class ResearchResponse(BaseModel):
-    cached: bool
-    cachedAt: Optional[str] = None      # ISO 8601 if cached
-    sections: ResearchSections
-    dataRetrievalAvailable: bool
-    generatedAt: str                    # ISO 8601
+# Response payload (inside APIResponse.data):
+# {
+#   "cached": bool,
+#   "cachedAt": Optional[str],          # ISO 8601 if cached
+#   "sections": ResearchSections,
+#   "dataRetrievalAvailable": bool,
+#   "generatedAt": str                  # ISO 8601
+# }
 
 
 # API Response Envelope (all endpoints)
@@ -568,14 +570,14 @@ Submit a specific section of a previous research result for deeper analysis. Tri
 |---|---|
 | Auth required | Yes |
 | Request body | `DeepResearchRequest` |
-| Response body | `APIResponse[ResearchResponse]` |
+| Response body | `APIResponse` |
 | Success code | `200 OK` |
 
 ```python
 class DeepResearchRequest(BaseModel):
     payload: str = Field(min_length=1, max_length=5000)    # original payload
     source: str = Field(min_length=1, max_length=253)       # source URL
-    parentRequestId: str                                     # requestId from the original ResearchResponse
+    parentRequestId: str                                     # requestId from the original research response
     section: str                                             # section name the user clicked (e.g. "riskFactors")
     sectionContent: str                                      # current content of that section
     timestamp: int                                           # Unix milliseconds
@@ -966,11 +968,11 @@ POST /v1/research (ResearchRequest)
     ├── Step 1: JWT validated (FastAPI dependency — before router)
     │
     ├── Step 2: Redis cache lookup
-    │              HIT  ──────────────────────────────────────────► return ResearchResponse (cached=True)
+    │              HIT  ──────────────────────────────────────────► return cached response (cached=True)
     │              MISS ──► continue
     │
     ├── Step 3: Pinecone semantic match
-    │              MATCH (cosine > 0.92) ──────────────────────────► return ResearchResponse (cached=True)
+    │              MATCH (cosine > 0.92) ──────────────────────────► return cached response (cached=True)
     │              NO MATCH ──► continue
     │
     ├── Step 4: Brave Search + Firecrawl
@@ -987,7 +989,7 @@ POST /v1/research (ResearchRequest)
     │
     ├── Step 8: Cache in Redis + upsert Pinecone embedding
     │
-    └── return ResearchResponse (cached=False)
+    └── return response payload (cached=False)
 ```
 
 ### Step 1 — JWT Validation
@@ -1596,7 +1598,7 @@ Redis is used for three purposes: response caching, rate limit counters, and one
 
 | Key Pattern | TTL | Data Type | Contents |
 |---|---|---|---|
-| `research:{payload_hash}:{date}` | 4 hours (14,400s) | String (JSON) | Full `ResearchResponse` payload as JSON string |
+| `research:{payload_hash}:{date}` | 4 hours (14,400s) | String (JSON) | Full response payload as JSON string |
 | `rate:{user_id}:{YYYY-MM}` | Until end of month + 1 day | String (integer) | Monthly query count for the user |
 | `auth_code:{CODE}` | 5 minutes (300s) | String | `user_id` value (UTF-8 encoded) |
 | `login_fail:{email_hash}` | 15 minutes (900s) | String (integer) | Count of failed login attempts |
@@ -1775,7 +1777,7 @@ async def check_burst_rate_limit(
 
 ```python
 # src/routers/research.py
-@router.post("/research", response_model=ResearchResponse)
+@router.post("/research")
 async def create_research(
     body: ResearchRequest,
     user: User = Depends(check_burst_rate_limit),
@@ -1783,7 +1785,7 @@ async def create_research(
 ):
     ...
 
-@router.post("/research/deep", response_model=ResearchResponse)
+@router.post("/research/deep")
 async def create_deep_research(
     body: DeepResearchRequest,
     user: User = Depends(check_burst_rate_limit),

@@ -1,8 +1,9 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
-from src.api.v1.schemas import ResearchRequest, ResearchResponse, ResearchSections
+from src.api.v1.schemas import ResearchRequest, ResearchSections
 from src.db import ResearchHistory, user_fingerprint
 from src.core.exceptions import IQinsytException
 from src.services.cache_service import get_cached_research, set_cached_research
@@ -16,14 +17,14 @@ async def run_research_pipeline(
     body: ResearchRequest,
     api_key: str,
     request_id: str,
-) -> ResearchResponse:
+) -> dict[str, Any]:
     fingerprint = user_fingerprint(api_key)
 
     # ── Step 1: Cache lookup ────────────────────────────────────────────────
     cached = await get_cached_research(body.eventTitle)
     if cached:
         logger.info("Cache HIT for %r (request_id=%s)", body.eventTitle, request_id)
-        sections = ResearchSections(**cached.sections)
+        sections = ResearchSections(**cached.sections).model_dump()
 
         # Fire-and-forget history write (don't await — don't block response)
         asyncio.create_task(
@@ -38,20 +39,17 @@ async def run_research_pipeline(
             )
         )
 
-        return ResearchResponse(
-            cached=True,
-            cachedAt=cached.generated_at.isoformat(),
-            sections=sections,
-            dataRetrievalAvailable=cached.data_retrieval_available,
-            generatedAt=cached.generated_at.isoformat(),
-        )
+        return {
+            "cached": True,
+            "cachedAt": cached.generated_at.isoformat(),
+            "sections": sections,
+            "dataRetrievalAvailable": cached.data_retrieval_available,
+            "generatedAt": cached.generated_at.isoformat(),
+        }
 
     # ── Step 2: Web search ──────────────────────────────────────────────────
-    logger.info(
-        "Cache MISS for %r — running pipeline (request_id=%s)",
-        body.eventTitle,
-        request_id,
-    )
+    logger.info("Cache MISS for %r — running pipeline (request_id=%s)",body.eventTitle,request_id)
+    
     context_text, data_retrieval_available = await gather_search_context(
         body.eventTitle, request_id
     )
@@ -97,13 +95,13 @@ async def run_research_pipeline(
     )
 
     # ── Step 7: Return ───────────────────────────────────────────────────────
-    return ResearchResponse(
-        cached=False,
-        cachedAt=None,
-        sections=ResearchSections(**sections_dict),
-        dataRetrievalAvailable=data_retrieval_available,
-        generatedAt=generated_at.isoformat(),
-    )
+    return {
+        "cached": False,
+        "cachedAt": None,
+        "sections": ResearchSections(**sections_dict).model_dump(),
+        "dataRetrievalAvailable": data_retrieval_available,
+        "generatedAt": generated_at.isoformat(),
+    }
 
 
 async def _write_history(

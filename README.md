@@ -26,7 +26,7 @@ FastAPI-based async research API that powers the IQinsyt Chrome extension. It ac
 ## Architecture Overview
 
 ```
-Chrome Extension ──HTTP──► FastAPI Backend ──► Brave Search API (web context)
+Chrome Extension ──HTTP──► FastAPI Backend ──► SearXNG (web context, active)
                               │
                               ├──► OpenAI GPT-4o-mini (structured analysis)
                               │
@@ -38,7 +38,7 @@ Chrome Extension ──HTTP──► FastAPI Backend ──► Brave Search API 
 The backend is the **AI research engine** of the IQinsyt platform. Its sole responsibility is:
 
 1. Receive an event/topic from the Chrome extension
-2. Gather real-time web context via Brave Search
+2. Gather real-time web context via SearXNG
 3. Generate neutral, factual analysis via GPT-4o-mini
 4. Enforce strict compliance rules to block predictive/biased language
 5. Return structured research with 7 defined sections
@@ -59,7 +59,7 @@ iqinsyt_backend/
 │   │   └── v1/
 │   │       ├── __init__.py
 │   │       ├── research.py           # POST /v1/research endpoint
-│   │       └── schemas.py           # Pydantic schemas: ResearchRequest, ResearchSections, ResearchResponse, APIResponse
+│   │       └── schemas.py           # Pydantic schemas: ResearchRequest, ResearchSections, APIResponse
 │   │
 │   ├── core/                         # Shared infrastructure
 │   │   ├── __init__.py
@@ -78,7 +78,7 @@ iqinsyt_backend/
 │       ├── compliance_service.py     # Neutrality enforcement (36 regex patterns)
 │       ├── llm_service.py            # OpenAI GPT-4o-mini integration
 │       ├── research_service.py       # Pipeline orchestrator
-│       └── search_service.py         # Brave Search API integration
+│       └── search_service.py         # SearXNG integration (Brave helper retained)
 │
 ├── .env                              # Local secrets (gitignored)
 ├── .env.example                      # Environment variable template
@@ -101,7 +101,7 @@ iqinsyt_backend/
 | **Server** | Gunicorn + Uvicorn workers (production) |
 | **Database** | MongoDB via Beanie ODM + Motor async driver |
 | **LLM** | OpenAI GPT-4o-mini (async SDK) |
-| **Web Search** | Brave Search API |
+| **Web Search** | SearXNG (active), Brave helper retained |
 | **HTTP Client** | httpx (async) |
 | **Settings** | pydantic-settings + python-dotenv |
 | **Package Manager** | uv |
@@ -114,7 +114,8 @@ iqinsyt_backend/
 - **MongoDB** — local or Atlas connection string
 - **API Keys**:
   - `OPENAI_API_KEY` — OpenAI account
-  - `BRAVE_API_KEY` — Brave Search account (free tier available)
+  - `SEARXNG_BASE_URL` — SearXNG endpoint URL (example: `http://localhost:8080`)
+  - `BRAVE_API_KEY` — Optional (Brave helper retained but currently inactive)
 
 ---
 
@@ -143,7 +144,8 @@ MONGODB_URL=mongodb://localhost:27017
 MONGODB_DB_NAME=iqinsyt
 API_KEY=your-secret-key-here
 OPENAI_API_KEY=sk-proj-...
-BRAVE_API_KEY=BSA...
+SEARXNG_BASE_URL=http://localhost:8080
+BRAVE_API_KEY=BSA...  # optional/inactive
 ```
 
 ### 3. Run the server
@@ -194,7 +196,8 @@ All configuration is managed through environment variables or a `.env` file. The
 | `MONGODB_DB_NAME` | `iqinsyt` | Database name |
 | `API_KEY` | `dev-key-change-me` | Shared secret for API auth (sent via `X-API-Key` header) |
 | `OPENAI_API_KEY` | `""` | OpenAI API key for GPT-4o-mini |
-| `BRAVE_API_KEY` | `""` | Brave Search API key |
+| `SEARXNG_BASE_URL` | `""` | SearXNG base URL (active web search provider) |
+| `BRAVE_API_KEY` | `""` | Optional Brave API key (helper retained, currently inactive) |
 | `APP_VERSION` | `0.1.0` | App version string |
 | `CORS_ORIGINS` | `chrome-extension://*,http://localhost:*` | Comma-separated allowed origins |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
@@ -319,7 +322,7 @@ Step 1: Cache Lookup
             │
             ▼
 Step 2: Web Search
-    Run 3 parallel Brave Search queries: "{title} news", "{title} analysis", "{title} preview"
+    Run 3 parallel SearXNG queries: "{title} news", "{title} analysis", "{title} preview"
     Deduplicate by URL, cap at 6 results, cap text at 9,000 chars
     │
     ▼
@@ -343,7 +346,7 @@ Step 6: Persist
     Parallel write: cache update + history record
     │
     ▼
-Step 7: Return ResearchResponse
+Step 7: Return response payload
 ```
 
 ---
@@ -406,7 +409,7 @@ The architecture spec (`architecture_backend.md`) describes a full JWT-based aut
 - **TTL**: 4 hours
 - **Key**: `sha256(title)[:16]:YYYY-MM-DD`
 - **Mechanism**: MongoDB TTL index on `expires_at` field auto-deletes expired documents
-- **Behavior**: On cache hit, returns immediately without calling Brave Search or LLM
+- **Behavior**: On cache hit, returns immediately without calling SearXNG or LLM
 
 ```python
 # Cache key example
@@ -419,7 +422,7 @@ The architecture spec (`architecture_backend.md`) describes a full JWT-based aut
 The architecture spec describes a more sophisticated caching strategy:
 1. **Redis** — exact-match cache (fast, sub-millisecond)
 2. **Pinecone** — semantic similarity cache (fuzzy match for similar topics)
-3. **Full pipeline** — Brave Search + LLM (fallback)
+3. **Full pipeline** — SearXNG + LLM (fallback)
 
 ---
 
@@ -531,7 +534,7 @@ ruff format src/
 - **Async-first**: All I/O operations use async/await
 - **No blocking calls**: Use `asyncio.wait_for()` for timeouts
 - **Fire-and-forget**: Non-critical writes (history) use `asyncio.create_task()` without await
-- **Graceful degradation**: Missing API keys skip features rather than crash (e.g., no Brave key → skip web search, LLM still works with general knowledge)
+- **Graceful degradation**: Missing search config skips web retrieval without crashing (e.g., no `SEARXNG_BASE_URL` → skip web search, LLM still works with general knowledge)
 - **Concise logging**: Log metadata only (titles, IDs, error types) — never dump full payloads, context text, or LLM responses
 
 ---
@@ -557,7 +560,8 @@ This runs Gunicorn with:
 MONGODB_URL=mongodb+srv://user:pass@cluster.mongodb.net/
 API_KEY=<strong-random-key>
 OPENAI_API_KEY=sk-proj-...
-BRAVE_API_KEY=BSA...
+SEARXNG_BASE_URL=https://your-searxng-instance.example
+BRAVE_API_KEY=BSA...  # optional/inactive
 LOG_LEVEL=INFO
 LOG_JSON_FORMAT=true
 CORS_ORIGINS=https://yourdomain.com,chrome-extension://your-extension-id

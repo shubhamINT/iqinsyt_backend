@@ -34,11 +34,3 @@ class ResearchSections(BaseModel):
     riskFactors: str
     dataConfidence: str
     dataGaps: str
-
-
-class ResearchResponse(BaseModel):
-    cached: bool
-    cachedAt: Optional[str]
-    sections: ResearchSections
-    dataRetrievalAvailable: bool
-    generatedAt: str

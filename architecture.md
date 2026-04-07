@@ -513,7 +513,7 @@ interface ApiResponse<T> {
   timestamp: string;
 }
 
-interface ResearchResponse {
+interface ResponseData {
   cached: boolean;
   cachedAt: string | null;
   sections: {
@@ -748,7 +748,7 @@ STEP 13 — Neutrality & Compliance Layer
   FAIL → re-queue (max 2 more attempts), then return partial output.
 
 STEP 14 — Response returned to extension
-  Backend returns API envelope with ResearchResponse payload.
+  Backend returns API envelope with structured response data.
   Background worker receives it, sends ANALYSIS_RESULT to side panel.
 
 STEP 15 — Side panel renders result

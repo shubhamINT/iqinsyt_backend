@@ -53,3 +53,5 @@ htmlcov/
 # mypy / ruff / type checkers
 .mypy_cache/
 .ruff_cache/
+
+.codex
