@@ -247,6 +247,7 @@ Main research endpoint. Requires `X-API-Key` header.
 ```
 Content-Type: application/json
 X-API-Key: <your-api-key>
+Accept: text/event-stream
 ```
 
 **Request Body:**
@@ -258,9 +259,18 @@ X-API-Key: <your-api-key>
 }
 ```
 
-**Response:**
-```json
-{
+**Response (SSE stream):**
+```text
+event: research.started
+data: {"request_id":"uuid-string","stage":"request.accepted","message":"Research request accepted"}
+
+event: research.progress
+data: {"request_id":"uuid-string","stage":"cache.lookup.started","message":"Checking cache for existing research"}
+
+...
+
+event: research.completed
+data: {
   "success": true,
   "data": {
     "cached": false,
@@ -282,19 +292,22 @@ X-API-Key: <your-api-key>
 }
 ```
 
-**Error Responses:**
+**Error Responses (SSE):**
 
-All errors include `success: false`, `error`, `message`, `request_id`, and `timestamp`:
+On failures, the stream emits `event: research.error` with:
 
 ```json
 {
   "success": false,
   "error": "INVALID_API_KEY",
   "message": "Invalid or missing API key.",
+  "status_code": 401,
   "request_id": "uuid-string",
   "timestamp": "2025-04-01T12:00:00Z"
 }
 ```
+
+HTTP status is `200` for a successfully opened stream; use `status_code` in `research.error` for failure semantics.
 
 | Status | Error Code | Cause |
 |--------|-----------|-------|
@@ -326,49 +339,45 @@ Step 2: Web Search
     Deduplicate by URL, cap at 6 results, cap text at 9,000 chars
     │
     ▼
-Step 3+4: Compliant LLM Pipeline
-    Assemble prompt with system prompt + section instructions + negative constraints
-    Call GPT-4o-mini (8s timeout, temperature 0.2, JSON output)
-    Scan output against 36 compliance regex patterns
+Step 3: LLM Generation
+    Assemble prompt (system prompt with BAD/GOOD examples + per-section instructions)
+    Stream OpenAI Responses API (8s timeout, temperature 0.2, JSON output)
+    Neutrality enforced by prompt design — no post-generation scanning
     │
-    ├── PASS → Return sections
+    ├── SUCCESS → Return sections dict
     │
-    ├── FAIL (attempt < 3) → Retry with violated phrases added as "avoid these" constraints
-    │
-    └── FAIL (attempt 3) → Per-section quarantine (keep compliant sections, placeholder the rest)
+    └── FAILURE (None returned) → raise 503 IQinsytException
             │
             ▼
-Step 5: Total Failure Check
-    If ALL sections are placeholders → raise 503 IQinsytException
-    │
-    ▼
-Step 6: Persist
+Step 4: Persist
     Parallel write: cache update + history record
     │
     ▼
-Step 7: Return response payload
+Step 5: Return response payload
 ```
 
 ---
 
 ## Compliance & Neutrality
 
-The compliance engine (`src/services/compliance_service.py`) ensures all research output is neutral, factual, and free of predictive or biased language.
+Neutrality is enforced entirely through prompt design — no post-generation scanning or retry loops.
 
 ### How It Works
 
-1. LLM generates 7 research sections as JSON
-2. Each section is scanned against **36 regex patterns** across 4 categories:
-   - **Predictive language**: "likely to", "expected to", "odds favour", "probability of", "forecast", etc.
-   - **Recommendation language**: "consider backing", "worth backing", "good pick", "strong case for", etc.
-   - **Emotionally charged language**: "dominant", "unstoppable", "inevitably", "sure to", "guaranteed", etc.
-   - **Outcome ranking**: "favourite", "underdog", "has the edge", "stronger team", etc.
-3. If violations found, the LLM retries (up to 3 attempts) with violated phrases fed back as "avoid these" constraints
-4. After 3 failed attempts, **per-section quarantine** is applied — compliant sections are kept, violating sections are replaced with `"[Section unavailable — compliance filter applied]"`
+The system prompt in `src/services/llm_service.py` instructs the model with:
+- **Role framing**: the model understands it is a fact compiler for prediction market traders, not an advisor
+- **BAD/GOOD examples** for each violation category — showing the rewrite, not just listing banned words:
+  - Predictive language: `"likely to win"` → `"has won 5 of last 6 matches"`
+  - Probability language: `"more likely"` → `"leads in 3 of 5 polls"`
+  - Ranking language: `"favourite"` → `"finished 1st in conference with +34 GD"`
+  - Recommendation language: `"worth backing"` → `"has not lost at this venue in 14 matches"`
+  - Absolute language: `"guaranteed to"` → `"all 12 surveyed economists forecast..."`
+- **Per-section BAD/GOOD examples** in the user prompt, so the model knows exactly what tone to use in each section
+- **Self-check instruction**: the model is told to read each sentence and ask "does this state a fact, or imply what will happen?" before responding
 
-### Why This Matters
+### Why This Approach
 
-The Chrome extension is used for prediction market research. The output must be purely informational — never suggesting which outcome to bet on, never predicting winners, never using emotionally charged language.
+Post-generation regex scanning was a symptom fix. A precisely written prompt with concrete examples is more reliable — the model learns the *reasoning* behind neutrality, not just a list of banned words. This also eliminates retry latency and enables direct SSE token streaming to the frontend.
 
 ---
 
