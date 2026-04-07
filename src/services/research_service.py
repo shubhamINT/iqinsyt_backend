@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 from src.api.v1.schemas import ResearchRequest, ResearchResponse, ResearchSections
-from src.core.database import ResearchHistory, user_fingerprint
+from src.db import ResearchHistory, user_fingerprint
 from src.core.exceptions import IQinsytException
 from src.services.cache_service import get_cached_research, set_cached_research
 from src.services.compliance_service import run_compliant_pipeline

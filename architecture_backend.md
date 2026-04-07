@@ -125,10 +125,41 @@ The IQinsyt backend is a **Python 3.12 / FastAPI async REST API** that powers bo
 
 ## 3. Project Structure
 
+### Current implementation (as of April 2026)
+
+```text
+iqinsyt_backend/
+├── src/
+│   ├── api/
+│   │   ├── server.py
+│   │   └── v1/
+│   │       ├── research.py
+│   │       └── schemas.py
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── dependencies.py
+│   │   ├── exceptions.py
+│   │   └── logging_config.py
+│   ├── db/
+│   │   ├── __init__.py               # init_db/close_db + cache/fingerprint helpers
+│   │   └── models.py                 # ResearchCache + ResearchHistory documents
+│   └── services/
+│       ├── cache_service.py
+│       ├── compliance_service.py
+│       ├── llm_service.py
+│       ├── research_service.py
+│       └── search_service.py
+└── server_run.py
+```
+
+Note: the database module is now centralized under `src/db/`. The old `src/core/database.py` file has been removed.
+
+### Planned full structure (target architecture)
+
 ```
 iqinsyt-backend/
 │
-├── app/
+├── src/
 │   ├── __init__.py
 │   ├── main.py                        # FastAPI app factory, middleware, startup hooks
 │   │
@@ -743,10 +774,10 @@ Store the PEM strings in `.env` with literal `\n` encoded as `\\n` (or use multi
 **Token creation:**
 
 ```python
-# app/core/security.py
+# src/core/security.py
 from jose import jwt
 from datetime import datetime, timedelta, timezone
-from app.core.config import settings
+from src.core.config import settings
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 15
 ALGORITHM = "RS256"
@@ -770,12 +801,12 @@ def verify_access_token(token: str) -> dict:
 **FastAPI dependency for protected endpoints:**
 
 ```python
-# app/core/dependencies.py
+# src/core/dependencies.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError
-from app.core.security import verify_access_token
-from app.db.session import get_db
+from src.core.security import verify_access_token
+from src.db.session import get_db
 
 bearer_scheme = HTTPBearer()
 
@@ -810,7 +841,7 @@ Refresh tokens are opaque 64-byte random hex strings stored **hashed** in MongoD
 5. The old row is never deleted — it stays with `used = True` for the replay detection audit trail.
 
 ```python
-# app/services/auth_service.py
+# src/services/auth_service.py
 import secrets
 import hashlib
 
@@ -875,7 +906,7 @@ async def rotate_refresh_token(
 The web app generates a short-lived 8-character alphanumeric code stored in Redis. The Chrome extension exchanges it for a full token pair.
 
 ```python
-# app/services/auth_service.py
+# src/services/auth_service.py
 import secrets
 import string
 
@@ -925,7 +956,7 @@ async def exchange_auth_code(
 
 ## 6. Research Module — The AI Pipeline
 
-Every call to `POST /v1/research` passes through 8 discrete async steps in `app/services/research_service.py`. Each step is a separate async function to make them independently testable and replaceable.
+Every call to `POST /v1/research` passes through 8 discrete async steps in `src/services/research_service.py`. Each step is a separate async function to make them independently testable and replaceable.
 
 ### Pipeline Overview
 
@@ -966,7 +997,7 @@ Handled by the `get_current_user` FastAPI dependency injected into the router. B
 ### Step 2 — Redis Cache Lookup
 
 ```python
-# app/services/cache_service.py
+# src/services/cache_service.py
 import hashlib
 import json
 from datetime import date
@@ -999,7 +1030,7 @@ On a cache hit, return immediately with `cached=True` and `cachedAt` set to the 
 The embedding for the incoming `payload` is generated using `text-embedding-3-small` (OpenAI). This model produces 1536-dimensional vectors. The vector is queried against the Pinecone index to find semantically similar prior queries.
 
 ```python
-# app/services/vector_service.py
+# src/services/vector_service.py
 from openai import AsyncOpenAI
 from pinecone import Pinecone
 
@@ -1037,9 +1068,9 @@ The 0.92 cosine similarity threshold is calibrated so that "Manchester City vs A
 ### Step 4 — Brave Search + Firecrawl Scraping
 
 ```python
-# app/services/search_service.py
+# src/services/search_service.py
 import httpx
-from app.core.config import settings
+from src.core.config import settings
 
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 
@@ -1077,9 +1108,9 @@ async def gather_search_results(payload: str) -> list[dict]:
 ```
 
 ```python
-# app/services/scrape_service.py
+# src/services/scrape_service.py
 from firecrawl import FirecrawlApp
-from app.core.config import settings
+from src.core.config import settings
 
 async def scrape_urls(urls: list[str]) -> tuple[str, bool]:
     """
@@ -1103,7 +1134,7 @@ async def scrape_urls(urls: list[str]) -> tuple[str, bool]:
 ### Step 5 — Prompt Assembly
 
 ```python
-# app/services/research_service.py
+# src/services/research_service.py
 
 SYSTEM_PROMPT = """You are a neutral research analyst. Your sole role is to surface \
 factual, structured information about the content provided. You must not make predictions, \
@@ -1163,9 +1194,9 @@ Research context:
 ### Step 6 — LLM Call
 
 ```python
-# app/services/llm_service.py
+# src/services/llm_service.py
 from openai import AsyncOpenAI
-from app.core.config import settings
+from src.core.config import settings
 
 MODEL_MAP = {
     "free":    "gpt-4o-mini",
@@ -1228,7 +1259,7 @@ See Section 7 for the full compliance implementation. This step wraps the LLM ca
 ### Step 8 — Cache Write + Pinecone Upsert
 
 ```python
-# app/services/research_service.py
+# src/services/research_service.py
 
 async def store_result(
     payload: str,
@@ -1274,7 +1305,7 @@ The compliance layer is **mandatory and non-bypassable**. Every LLM response pas
 ### 7.1 Blocked Patterns — Full Regex List
 
 ```python
-# app/services/compliance_service.py
+# src/services/compliance_service.py
 import re
 
 COMPLIANCE_PATTERNS: list[re.Pattern] = [
@@ -1346,7 +1377,7 @@ def scan_sections(sections: dict) -> dict[str, list[str]]:
 ### 7.3 The 3-Attempt Loop with Per-Section Quarantine
 
 ```python
-# app/services/compliance_service.py
+# src/services/compliance_service.py
 
 UNAVAILABLE_PLACEHOLDER = "[Section unavailable — compliance filter applied]"
 
@@ -1435,16 +1466,18 @@ Audit logs are **never deleted**. They are append-only and serve as the complian
 
 MongoDB is the primary database. All documents use Beanie ODM (built on Motor, the async MongoDB driver). No migrations are needed — MongoDB is schemaless. Indexes are declared on the model and created at startup via `init_beanie()`.
 
+Current code status: the live implementation keeps DB lifecycle and helper functions in `src/db/__init__.py`, and the active document models in `src/db/models.py` (`ResearchCache`, `ResearchHistory`).
+
 ### 8.1 Beanie Initialization
 
 ```python
-# app/db/init.py
+# src/db/init.py
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
-from app.core.config import settings
-from app.models.user import User, RefreshToken
-from app.models.research import ResearchHistory
-from app.models.compliance_audit import ComplianceAuditLog
+from src.core.config import settings
+from src.models.user import User, RefreshToken
+from src.models.research import ResearchHistory
+from src.models.compliance_audit import ComplianceAuditLog
 
 async def init_db() -> AsyncIOMotorClient:
     client = AsyncIOMotorClient(settings.MONGODB_URL)
@@ -1458,7 +1491,7 @@ async def init_db() -> AsyncIOMotorClient:
 ### 8.2 User Document
 
 ```python
-# app/models/user.py
+# src/models/user.py
 from datetime import datetime, timezone
 from typing import Optional
 from beanie import Document, Indexed
@@ -1484,7 +1517,7 @@ class User(Document):
 ### 8.3 Refresh Token Document
 
 ```python
-# app/models/user.py (continued)
+# src/models/user.py (continued)
 class RefreshToken(Document):
     user_id: Indexed(str)
     token_hash: Indexed(str, unique=True)
@@ -1500,7 +1533,7 @@ class RefreshToken(Document):
 ### 8.4 Research History Document
 
 ```python
-# app/models/research.py
+# src/models/research.py
 from datetime import datetime, timezone
 from typing import Any
 from beanie import Document, Indexed
@@ -1526,7 +1559,7 @@ class ResearchHistory(Document):
 ### 8.5 Compliance Audit Log Document
 
 ```python
-# app/models/compliance_audit.py
+# src/models/compliance_audit.py
 from datetime import datetime, timezone
 from beanie import Document, Indexed
 
@@ -1578,7 +1611,7 @@ Redis is used for three purposes: response caching, rate limit counters, and one
 **Monthly counter implementation:**
 
 ```python
-# app/services/cache_service.py
+# src/services/cache_service.py
 from calendar import monthrange
 from datetime import datetime, timezone
 
@@ -1692,7 +1725,7 @@ Additionally, login attempts are rate-limited regardless of plan: 5 failed attem
 Rate limiting is implemented as a FastAPI dependency that wraps Redis counter checks. It runs **after** JWT validation so that `user_id` and `plan` are available.
 
 ```python
-# app/core/dependencies.py
+# src/core/dependencies.py
 from fastapi import Depends, HTTPException, Request, status
 
 PLAN_MONTHLY_LIMITS = {"free": 10, "starter": 100, "pro": 500}
@@ -1741,7 +1774,7 @@ async def check_burst_rate_limit(
 **Router usage:**
 
 ```python
-# app/routers/research.py
+# src/routers/research.py
 @router.post("/research", response_model=ResearchResponse)
 async def create_research(
     body: ResearchRequest,
@@ -1817,7 +1850,7 @@ There is no explicit cache invalidation for research results. The 4-hour TTL is 
 All API errors return a consistent JSON envelope:
 
 ```python
-# app/schemas/errors.py (also used in exception handlers)
+# src/schemas/errors.py (also used in exception handlers)
 class ErrorResponse(BaseModel):
     error: str         # machine-readable code, e.g. "INVALID_TOKEN"
     message: str       # human-readable description
@@ -1856,7 +1889,7 @@ Example:
 ### 13.3 FastAPI Exception Handlers
 
 ```python
-# app/core/exceptions.py
+# src/core/exceptions.py
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -1914,7 +1947,7 @@ def register_exception_handlers(app):
 Every request receives a `X-Request-ID` header (UUID) injected by middleware. This ties logs, error responses, and database records together for debugging.
 
 ```python
-# app/main.py
+# src/api/server.py
 from starlette.middleware.base import BaseHTTPMiddleware
 import uuid
 
@@ -1933,7 +1966,7 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 All configuration is managed via Pydantic `Settings` reading from a `.env` file.
 
 ```python
-# app/core/config.py
+# src/core/config.py
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -2108,10 +2141,10 @@ If you need to create or drop indexes manually (e.g., during local development o
 import asyncio
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
-from app.core.config import settings
-from app.models.user import User, RefreshToken
-from app.models.research import ResearchHistory
-from app.models.compliance_audit import ComplianceAuditLog
+from src.core.config import settings
+from src.models.user import User, RefreshToken
+from src.models.research import ResearchHistory
+from src.models.compliance_audit import ComplianceAuditLog
 
 async def main():
     client = AsyncIOMotorClient(settings.MONGODB_URL)
@@ -2148,61 +2181,77 @@ docker-compose up -d db redis
 python scripts/setup_pinecone.py
 
 # Start the API server with hot reload
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
 
 # API is now available at: http://localhost:8000
 # Interactive docs: http://localhost:8000/docs
 # ReDoc: http://localhost:8000/redoc
 ```
 
-### 15.4 Application Entry Point (`app/main.py`)
+### 15.4 Application Entry Point (`src/api/server.py`)
 
 ```python
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import uuid
 from contextlib import asynccontextmanager
-from app.core.config import settings
-from app.core.exceptions import register_exception_handlers
-from app.routers import auth, research, user, billing
-from app.db.init import init_db
-import redis.asyncio as aioredis
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.api.v1.schemas import APIResponse
+from src.api.v1.research import router as research_router
+from src.core.config import settings
+from src.core.exceptions import register_exception_handlers
+from src.core.logging_config import setup_logging, get_logger
+from src.db import init_db, close_db, _mongo_client
+
+logger = get_logger("app")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    app.state.mongo_client = await init_db()
-    app.state.redis = aioredis.from_url(settings.REDIS_URL, decode_responses=False)
+    setup_logging()
+    logger.info("Starting IQinsyt Backend v%s", settings.APP_VERSION)
+    await init_db()
     yield
-    # Shutdown
-    app.state.mongo_client.close()
-    await app.state.redis.aclose()
+    await close_db()
 
 app = FastAPI(
-    title="IQinsyt API",
+    title="IQinsyt Backend",
     version=settings.APP_VERSION,
     lifespan=lifespan,
-    docs_url="/docs" if settings.APP_ENV == "development" else None,
-    redoc_url="/redoc" if settings.APP_ENV == "development" else None,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=settings.cors_origins_list,
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 register_exception_handlers(app)
+app.include_router(research_router, prefix="/v1")
 
-app.include_router(auth.router, prefix="/v1")
-app.include_router(research.router, prefix="/v1")
-app.include_router(user.router, prefix="/v1")
-app.include_router(billing.router, prefix="/v1")
+@app.middleware("http")
+async def inject_request_id(request: Request, call_next):
+    request.state.request_id = str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
 
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "version": settings.APP_VERSION}
+@app.get("/health", tags=["health"])
+async def health(request: Request) -> APIResponse[dict]:
+    db_status = "ok"
+    if _mongo_client:
+        await _mongo_client.admin.command("ping")
+    else:
+        db_status = "error"
+
+    return APIResponse(
+        success=db_status == "ok",
+        data={"status": "ok" if db_status == "ok" else "degraded", "db": db_status, "version": settings.APP_VERSION},
+        request_id=request.state.request_id,
+    )
 ```
 
 ---
@@ -2233,7 +2282,7 @@ COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
-COPY app/ ./app/
+COPY src/ ./src/
 
 # Non-root user for security
 RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
@@ -2242,7 +2291,7 @@ USER appuser
 EXPOSE 8000
 
 # Gunicorn with uvicorn workers for production
-CMD ["gunicorn", "app.main:app", \
+CMD ["gunicorn", "src.api.server:app", \
      "--workers", "2", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
@@ -2270,8 +2319,8 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      - ./app:/app/app        # hot reload via uvicorn --reload in dev
-    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+      - ./src:/app/src        # hot reload via uvicorn --reload in dev
+    command: uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000
 
   db:
     image: mongo:7
@@ -2316,7 +2365,7 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "gunicorn app.main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 30"
+startCommand = "gunicorn src.api.server:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 30"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
@@ -2418,11 +2467,11 @@ from httpx import AsyncClient, ASGITransport
 from mongomock_motor import AsyncMongoMockClient
 from beanie import init_beanie
 from fakeredis.aioredis import FakeRedis
-from app.main import app
-from app.models.user import User, RefreshToken
-from app.models.research import ResearchHistory
-from app.models.compliance_audit import ComplianceAuditLog
-from app.core.dependencies import get_redis
+from src.api.server import app
+from src.models.user import User, RefreshToken
+from src.models.research import ResearchHistory
+from src.models.compliance_audit import ComplianceAuditLog
+from src.core.dependencies import get_redis
 
 @pytest_asyncio.fixture(scope="function", autouse=True)
 async def init_test_db():
@@ -2505,7 +2554,7 @@ Test cases must cover every pattern category. Include both positive (should trig
 
 ```python
 import pytest
-from app.services.compliance_service import scan_section, scan_sections
+from src.services.compliance_service import scan_section, scan_sections
 
 # --- SHOULD FAIL (triggers pattern) ---
 @pytest.mark.parametrize("text", [
@@ -2571,7 +2620,7 @@ MOCK_LLM_RESPONSE = {
 async def test_research_cache_hit(client, redis_client):
     """Cache hit should return without calling the LLM."""
     import json
-    from app.services.cache_service import make_cache_key, CACHE_TTL_SECONDS
+    from src.services.cache_service import make_cache_key, CACHE_TTL_SECONDS
 
     cached_payload = {
         "requestId": "abc123",
@@ -2590,7 +2639,7 @@ async def test_research_cache_hit(client, redis_client):
     })
     token = reg.json()["access_token"]
 
-    with patch("app.services.llm_service.call_llm") as mock_llm:
+    with patch("src.services.llm_service.call_llm") as mock_llm:
         response = await client.post(
             "/v1/research",
             json={"payload": "Arsenal vs Chelsea", "source": "bbc.co.uk", "timestamp": 1000},
@@ -2610,12 +2659,12 @@ async def test_research_full_pipeline(client):
     token = reg.json()["access_token"]
 
     with (
-        patch("app.services.search_service.gather_search_results", new_callable=AsyncMock, return_value=[]),
-        patch("app.services.scrape_service.scrape_urls", new_callable=AsyncMock, return_value=("", False)),
-        patch("app.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE),
-        patch("app.services.vector_service.semantic_match", new_callable=AsyncMock, return_value=None),
-        patch("app.services.vector_service.get_embedding", new_callable=AsyncMock, return_value=[0.0] * 1536),
-        patch("app.services.research_service.pinecone_index") as mock_pine,
+        patch("src.services.search_service.gather_search_results", new_callable=AsyncMock, return_value=[]),
+        patch("src.services.scrape_service.scrape_urls", new_callable=AsyncMock, return_value=("", False)),
+        patch("src.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE),
+        patch("src.services.vector_service.semantic_match", new_callable=AsyncMock, return_value=None),
+        patch("src.services.vector_service.get_embedding", new_callable=AsyncMock, return_value=[0.0] * 1536),
+        patch("src.services.research_service.pinecone_index") as mock_pine,
     ):
         mock_pine.upsert = MagicMock()
         response = await client.post(
@@ -2649,7 +2698,7 @@ async def test_monthly_limit_enforced(client, redis_client):
     key = f"rate:{user_id}:{now.strftime('%Y-%m')}"
     await redis_client.set(key, 10)
 
-    with patch("app.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE):
+    with patch("src.services.llm_service.call_llm", new_callable=AsyncMock, return_value=MOCK_LLM_RESPONSE):
         response = await client.post(
             "/v1/research",
             json={"payload": "Test Event", "source": "test.com", "timestamp": 1000},

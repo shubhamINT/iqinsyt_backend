@@ -64,10 +64,13 @@ iqinsyt_backend/
 │   ├── core/                         # Shared infrastructure
 │   │   ├── __init__.py
 │   │   ├── config.py                 # Pydantic Settings (reads .env)
-│   │   ├── database.py               # Beanie ODM documents, DB lifecycle
 │   │   ├── dependencies.py           # FastAPI Depends() — API key auth
 │   │   ├── exceptions.py             # Custom exception + error handlers
 │   │   └── logging_config.py         # ColoredFormatter, JsonFormatter, setup
+│   │
+│   ├── db/                           # Database lifecycle, models, hash helpers
+│   │   ├── __init__.py               # init/close MongoDB + cache/fingerprint helpers
+│   │   └── models.py                 # Beanie documents: research_cache/history
 │   │
 │   └── services/                     # Business logic
 │       ├── __init__.py
@@ -222,9 +225,14 @@ Health check — no authentication required.
 **Response:**
 ```json
 {
-  "status": "ok",
-  "db": "ok",
-  "version": "0.1.0"
+  "success": true,
+  "data": {
+    "status": "ok",
+    "db": "ok",
+    "version": "0.1.0"
+  },
+  "request_id": "uuid-string",
+  "timestamp": "2025-04-01T12:00:00Z"
 }
 ```
 
@@ -416,6 +424,8 @@ The architecture spec describes a more sophisticated caching strategy:
 ---
 
 ## Database Schema
+
+Beanie document models are defined in `src/db/models.py`. Connection lifecycle (`init_db`, `close_db`) and hashing helpers (`make_cache_key`, `user_fingerprint`) are defined in `src/db/__init__.py`.
 
 ### `research_cache`
 

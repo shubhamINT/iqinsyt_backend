@@ -1,6 +1,8 @@
 # IQinsyt Web App — Full Architecture & Developer Guide
 
 > **Scope:** This document covers the IQinsyt web app only — a companion website to the Chrome extension. It handles user registration, authentication, subscription management, dashboard, account settings, and the marketing landing page. The Chrome extension is documented separately in `architecture.md`.
+>
+> **Current repository status:** the backend currently implemented in this repository is the research API (`POST /v1/research`) with API-key auth (`X-API-Key`) under `src/` (`src/api`, `src/services`, `src/db`). The JWT auth + billing endpoints in this document are planned target architecture and are documented in `architecture_backend.md`.
 
 ---
 
@@ -35,7 +37,7 @@ IQinsyt is a **neutral AI-powered research utility** delivered as a Chrome exten
 - Manage their account settings
 
 **What this web app is NOT:**
-- Not a research tool itself — it does not call `/v1/insight` or display sports research output
+- Not a research tool itself — it does not call `/v1/research` or display sports research output
 - Not server-side rendered — it is a plain Vite SPA; there is no Next.js, no SSR, no server components
 - Not a Chrome extension or WebExtension — it runs in an ordinary browser tab
 - Not a mobile app — it targets desktop browsers only (the extension only runs on desktop Chrome)
@@ -75,7 +77,7 @@ IQinsyt is a **neutral AI-powered research utility** delivered as a Chrome exten
 │   Chrome Extension (installed separately)                                 │
 │   └── content script listens for auth-code message                       │
 └────────────────────────────────┬──────────────────────────────────────────┘
-                                 │ HTTPS + JWT
+                                 │ HTTPS + JWT (planned)
                                  ▼
                     ┌────────────────────────┐
                     │    api.iqinsyt.com      │
@@ -95,6 +97,13 @@ IQinsyt is a **neutral AI-powered research utility** delivered as a Chrome exten
                     │  (Checkout, webhooks)  │
                     └────────────────────────┘
 ```
+
+---
+
+Backend alignment note:
+
+- Implemented now: `POST /v1/research` + `GET /health` with `X-API-Key` auth (see `README.md` and `src/api/server.py`).
+- Planned for web app integration: JWT auth, user profile, auth-code exchange, billing endpoints (see `architecture_backend.md`).
 
 ---
 
