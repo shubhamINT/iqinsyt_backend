@@ -1,6 +1,8 @@
 # IQinsyt Chrome Extension — Full Architecture & Developer Guide
 
 > **Scope:** This document covers the Chrome extension only — its structure, frontend, backend integration, AI pipeline, data flow, and everything a developer needs to build it from scratch. The web app is a separate deliverable.
+>
+> **Current backend alignment:** this repository currently exposes `POST /v1/research` and `GET /health` with API-key auth (`X-API-Key`) from `src/api/server.py`. JWT-based extension login endpoints are planned and tracked in `architecture_backend.md`.
 
 ---
 
@@ -62,34 +64,34 @@ IQinsyt is a **neutral AI-powered research utility** delivered as a Chrome exten
 │    monitors tab changes, broadcasts site auth)   │              │
 └──────────────────────────────────────────────────┼─────────────┘
                                                    │
-                                          HTTPS + JWT
+                                          HTTPS + API key
                                                    │
                                                    ▼
                                         ┌──────────────────┐
-                                        │   API Gateway     │
-                                        │ (rate limit, JWT) │
+                                        │  FastAPI Backend  │
+                                        │ (API key auth)    │
                                         └────────┬─────────┘
                                                  │
                                                  ▼
                                         ┌──────────────────┐
                                         │  Backend Insight  │
                                         │     Engine        │
-                                        │ (NestJS/FastAPI)  │
+                                        │ (Python/FastAPI)  │
                                         └────────┬─────────┘
                                                  │
                               ┌──────────────────┼──────────────────┐
                               │                  │                  │
                               ▼                  ▼                  ▼
-                         Redis Cache       Vector DB          PostgreSQL
-                         (response)    (semantic match)    (users, audit)
+                        MongoDB TTL      Redis / Vector      PostgreSQL
+                          (current)       (planned)          (planned)
                               │
                               ▼
                      Brave Search API
-                     Firecrawl Scraper
+                     Firecrawl (planned)
                               │
                               ▼
                         LLM API Call
-                     (GPT-4o-mini / GPT-4o)
+                     (GPT-4o-mini current)
                               │
                               ▼
                   Neutrality & Compliance Layer
@@ -452,23 +454,22 @@ interface ExtensionMessage {
 The extension communicates with the backend over HTTPS only. Uses `fetch` (available in MV3 service workers).
 
 ```typescript
-const BASE_URL = import.meta.env.VITE_BACKEND_URL; // e.g. http://localhost:8080
+const BASE_URL = import.meta.env.VITE_BACKEND_URL; // e.g. http://localhost:8000
+const API_KEY = import.meta.env.VITE_BACKEND_API_KEY;
 
 async function authedFetch(path: string, init: RequestInit): Promise<Response> {
-  const token = await getAccessToken();
-  if (!token) throw new AuthError('No token');
+  if (!API_KEY) throw new AuthError('Missing API key');
 
   const response = await fetch(`${BASE_URL}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
+      'X-API-Key': API_KEY,
       ...init.headers,
     },
   });
 
-  if (response.status === 401) throw new AuthError('Session expired');
-  if (response.status === 402) throw new SubscriptionError('Plan inactive');
+  if (response.status === 401) throw new AuthError('Invalid API key');
   if (!response.ok) throw new ApiError(`Request failed: ${response.status}`);
 
   return response;
@@ -487,15 +488,15 @@ function sanitize(text: string): string {
 
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/v1/insight` | POST | Submit event, get 7-section research |
-| `/v1/auth/token` | POST | Exchange credentials for JWT |
-| `/v1/auth/refresh` | POST | Refresh expiring JWT |
-| `/v1/user/plan` | GET | Check subscription status |
+| `/v1/research` | POST | Submit event, get 7-section research |
+| `/health` | GET | Service + DB health check |
+
+Planned (not currently implemented in this backend repository): `/v1/auth/token`, `/v1/auth/refresh`, `/v1/user/plan`.
 
 ### Request Payload
 
 ```typescript
-interface InsightRequest {
+interface ResearchRequest {
   eventTitle: string;     // e.g. "Manchester City vs Arsenal"
   eventSource: string;    // hostname, e.g. "sportsbet.com.au"
   timestamp: number;      // Unix ms
@@ -505,10 +506,16 @@ interface InsightRequest {
 ### Response Structure
 
 ```typescript
-interface InsightResponse {
-  requestId: string;
+interface ApiResponse<T> {
+  success: boolean;
+  data?: T;
+  request_id: string;
+  timestamp: string;
+}
+
+interface ResponseData {
   cached: boolean;
-  cachedAt?: string;        // ISO timestamp if cached
+  cachedAt: string | null;
   sections: {
     eventSummary: string;
     keyVariables: string;
@@ -518,7 +525,7 @@ interface InsightResponse {
     dataConfidence: string;
     dataGaps: string;
   };
-  dataRetrievalAvailable: boolean; // false if Firecrawl failed
+  dataRetrievalAvailable: boolean;
   generatedAt: string;
 }
 ```
@@ -532,31 +539,24 @@ This section describes what happens inside the backend when the extension sends 
 ### Step-by-Step AI Pipeline
 
 ```
-Extension POST /v1/insight
+Extension POST /v1/research
          │
          ▼
-1. JWT validated by API Gateway
+1. API key validated by FastAPI dependency
          │
          ▼
-2. Redis cache lookup
+2. MongoDB cache lookup
    → Cache HIT:  return immediately (response tagged "Cached [Date]")
    → Cache MISS: continue
          │
          ▼
-3. Vector DB semantic match
-   → Similar prior query found: return adapted cached result
-   → No match: continue
-         │
-         ▼
-4. Public data retrieval
+3. Public data retrieval
    ├── Brave Search API  (avg 2.5 queries/session)
-   │     Searches: "[event] news", "[team/player] recent form", "[event] analysis"
-   └── Firecrawl scraper (avg 3 credits/session)
-         Scrapes top 2–3 results from Brave Search
-         → If Firecrawl fails: flag `dataRetrievalAvailable: false`, continue with event text only
+   │     Searches: "[event] news", "[event] analysis", "[event] preview"
+   └── (No Firecrawl in current implementation)
          │
          ▼
-5. Prompt Assembly
+4. Prompt Assembly
    System prompt:    "You are a neutral research analyst..."
    Event context:    Injected event title + source page
    Research context: Scraped/searched content (if available)
@@ -564,20 +564,19 @@ Extension POST /v1/insight
    Negative constraints: Explicit prohibitions (see Section 9)
          │
          ▼
-6. LLM API Call
+5. LLM API Call
    Default model: GPT-4o-mini
-   Premium model:  GPT-4o (for paid tier users)
    Hard timeout:   8 seconds
    → Timeout: return partial output with missing section labels
          │
          ▼
-7. Neutrality & Compliance Layer
-   → PASS: cache result in Redis, store in Vector DB, return to extension
-   → FAIL: re-queue for LLM regeneration (max 2 attempts)
-   → Still failing after 2 attempts: return partial output
+6. Neutrality & Compliance Layer
+   → PASS: cache result in MongoDB (TTL 4h), return to extension
+   → FAIL: re-queue for LLM regeneration (max 3 attempts)
+   → Still failing after retries: quarantine non-compliant sections
          │
          ▼
-8. Structured JSON response → extension
+7. Structured JSON response → extension
 ```
 
 ### LLM Prompt Structure (Overview)
@@ -674,8 +673,7 @@ Pattern scan (regex + semantic check)
       │     Return partial output (whatever sections passed)
       │     Log intervention: timestamp + trigger phrase + action
       ▼
-Cache result in Redis
-Store embedding in Vector DB
+Cache result in MongoDB TTL collection
 Return to extension
 ```
 
@@ -720,52 +718,40 @@ STEP 6 — User clicks "Analyse"
   StatusBar shows: "Analysing..."
 
 STEP 7 — Background worker calls backend
-  GET /v1/user/plan → verify subscription is active
-  POST /v1/insight with JWT + event payload
+  POST /v1/research with X-API-Key + event payload
 
-STEP 8 — API Gateway receives request
-  Validates JWT signature and expiry.
-  Checks rate limit (per user, per plan tier).
-  If invalid/expired JWT → 401 → extension shows "Session expired, please log in"
-  If rate limit exceeded → 429 → extension shows "Request limit reached"
+STEP 8 — Backend receives request
+  Validates X-API-Key.
+  If invalid key → 401 → extension shows "Invalid API key"
 
-STEP 9 — Backend checks Redis cache
+STEP 9 — Backend checks MongoDB cache
   Key: hash(eventTitle + date)
   HIT  → return cached response immediately (response time: ~50ms)
   MISS → continue to Step 10
 
-STEP 10 — Backend checks Vector DB
-  Encodes event title as embedding.
-  Searches for semantically similar prior queries.
-  MATCH (cosine similarity > 0.92) → return adapted cached result
-  NO MATCH → continue to Step 11
-
-STEP 11 — Public data retrieval
+STEP 10 — Public data retrieval
   Brave Search API: queries "[event] news", "[teams] recent form"
-  Firecrawl: scrapes top 2 search results
   Results assembled into research context string.
-  [If Firecrawl fails → set dataRetrievalAvailable=false, continue with event text only]
 
-STEP 12 — Prompt assembly
+STEP 11 — Prompt assembly
   System prompt + event context + research context + output structure + negative constraints
   Total token budget managed to stay within model context limits.
 
-STEP 13 — LLM call
-  Model: GPT-4o-mini (default) or GPT-4o (premium)
+STEP 12 — LLM call
+  Model: GPT-4o-mini
   Hard timeout: 8 seconds
   [If timeout → return partial output with available sections]
 
-STEP 14 — Neutrality & Compliance Layer
+STEP 13 — Neutrality & Compliance Layer
   Regex + semantic scan of LLM output.
-  PASS → cache in Redis (TTL: 4 hours), store embedding in Vector DB, go to Step 15.
+  PASS → cache in MongoDB TTL collection (4 hours), go to Step 14.
   FAIL → re-queue (max 2 more attempts), then return partial output.
-  All interventions audit-logged to PostgreSQL.
 
-STEP 15 — Response returned to extension
-  Backend returns InsightResponse JSON.
+STEP 14 — Response returned to extension
+  Backend returns API envelope with structured response data.
   Background worker receives it, sends ANALYSIS_RESULT to side panel.
 
-STEP 16 — Side panel renders result
+STEP 15 — Side panel renders result
   StatusBar: "Done"
   ResearchOutput component renders all 7 SectionBlocks.
   If cached: shows "Cached [date]" label.
@@ -784,13 +770,10 @@ Every error state must be visible to the user — no silent failures.
 | Failure | Extension Behaviour | UI Message |
 |---|---|---|
 | No event detected | Show ManualInput | "No event detected — enter manually" |
-| Auth failure (401) | Redirect to login | "Session expired. Please log in." |
-| Subscription inactive (402) | Block request | "Update your plan to continue." |
-| Rate limit (429) | Show error | "Request limit reached. Try again shortly." |
+| Auth failure (401) | Block request | "Invalid API key." |
 | LLM timeout (>8s) | Return partial output | "Partial result — some sections unavailable" |
 | LLM provider outage | Failover → serve cache | Show cached result with date label |
 | Compliance rejection (3rd attempt) | Return partial output | "Partial result — compliance filter applied" |
-| Firecrawl failure | Proceed without scraped data | "Data retrieval unavailable" label on result |
 | Network offline | Show error | "No connection. Please check your network." |
 | Backend 5xx | Show error + retry button | "Something went wrong. Try again." |
 
@@ -799,13 +782,11 @@ Every error state must be visible to the user — no silent failures.
 ```typescript
 // src/api/client.ts
 try {
-  const result = await requestInsight(event, token);
+  const result = await requestInsight(event);
   dispatch({ type: 'ANALYSIS_RESULT', payload: result });
 } catch (e) {
   if (e instanceof AuthError) {
     dispatch({ type: 'AUTH_REQUIRED' });
-  } else if (e instanceof SubscriptionError) {
-    dispatch({ type: 'SHOW_ERROR', message: 'Update your plan to continue.' });
   } else if (e.name === 'TimeoutError') {
     dispatch({ type: 'SHOW_ERROR', message: 'Request timed out. Try again.' });
   } else {
@@ -818,7 +799,18 @@ try {
 
 ## 12. Authentication & Security
 
-### JWT Flow
+### Current Backend Auth (This Repository)
+
+The current FastAPI backend in this repository uses a shared API key.
+
+```
+1. Extension reads VITE_BACKEND_API_KEY from build-time env
+2. Every request includes X-API-Key header
+3. Backend validates key in FastAPI dependency
+4. If invalid/missing key → 401 INVALID_API_KEY
+```
+
+### Planned JWT Flow (Future)
 
 ```
 1. User logs in via web app → receives JWT access token + refresh token
@@ -858,9 +850,8 @@ export async function getAccessToken(): Promise<string | null> {
 
 ### Security Rules
 
-- **Never store tokens in `localStorage`** — not accessible in service workers, and less secure
-- **Never log tokens** in console or error messages
-- **Never send tokens in URL query params** — header only
+- **Never log API keys or tokens** in console or error messages
+- **Never send API keys/tokens in URL query params** — header only
 - All backend communication over **HTTPS only** — no HTTP fallback
 - Input from the DOM (event title) must be **sanitized** before sending: strip HTML tags, limit to 500 characters
 - Content Security Policy in manifest: restrict `script-src` and `connect-src` to known domains
@@ -921,7 +912,8 @@ pnpm install
 
 `.env` file (already present in repo):
 ```
-VITE_BACKEND_URL=http://localhost:8080
+VITE_BACKEND_URL=http://localhost:8000
+VITE_BACKEND_API_KEY=dev-key-change-me
 ```
 
 ### Build Commands
@@ -1003,7 +995,7 @@ After running `pnpm build`:
 ### Unit Tests
 - Test `extractEventFromDOM()` with mock DOM structures from each supported platform
 - Test the compliance pattern scanner with known violating and passing strings
-- Test JWT expiry logic in `token.ts`
+- Test API key header injection + 401 handling in `api/client.ts`
 - Test each error type is correctly mapped to the right UI message
 
 ```bash
@@ -1012,7 +1004,7 @@ npm run test        # Jest + jsdom
 
 ### Integration Tests
 - Mock the backend with MSW (Mock Service Worker) to test full request/response cycle
-- Test each error response code (401, 402, 429, 500) produces the correct UI state
+- Test each error response code (401, 500) produces the correct UI state
 - Test that `cached: true` renders the cache label
 - Test that missing sections render `"[Data unavailable for this section]"` not blank
 
@@ -1024,8 +1016,7 @@ npm run test        # Jest + jsdom
 [ ] Test with a page where detection fails — manual input appears
 [ ] Submit manual input — full flow completes
 [ ] Simulate network offline — shows network error, no crash
-[ ] Let JWT expire — refresh runs, request succeeds
-[ ] Force JWT refresh failure — login prompt appears
+[ ] Remove/alter API key — extension shows auth error
 [ ] Confirm no green/red colours appear anywhere in UI
 [ ] Confirm no predictive language appears in any rendered output
 [ ] Confirm "Cached [date]" label appears on cache hit

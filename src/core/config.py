@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     API_KEY: str = "dev-key-change-me"
     OPENAI_API_KEY: str = ""
     BRAVE_API_KEY: str = ""
+    SEARXNG_BASE_URL: str = ""
     APP_VERSION: str = "0.1.0"
 
     # CORS — comma-separated list of allowed origins

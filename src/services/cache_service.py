@@ -1,7 +1,8 @@
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
-from src.core.database import ResearchCache, make_cache_key
+from src.db.models import ResearchCache
+from src.db import make_cache_key
 
 CACHE_TTL_HOURS = 4
 

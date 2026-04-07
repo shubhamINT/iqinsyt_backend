@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Any
 
 import httpx
 
@@ -11,6 +12,7 @@ BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 MAX_RESULTS_PER_QUERY = 5
 MAX_CONTEXT_RESULTS = 6
 MAX_CONTEXT_CHARS = 9000  # ~2,250 tokens, well within LLM window
+SEARXNG_TIMEOUT_SECONDS = 6.0
 
 
 async def brave_search(
@@ -18,8 +20,8 @@ async def brave_search(
     query: str,
     count: int = MAX_RESULTS_PER_QUERY,
     request_id: str = "",
-) -> list[dict]:
-    """Single Brave Search query. Returns list of result dicts."""
+) -> list[dict[str, Any]]:
+    """Single Brave Search query. Retained for future provider switching."""
     try:
         response = await client.get(
             BRAVE_SEARCH_URL,
@@ -44,19 +46,66 @@ async def brave_search(
         return []
 
 
+async def searxng_search(
+    client: httpx.AsyncClient,
+    query: str,
+    base_url: str,
+    count: int = MAX_RESULTS_PER_QUERY,
+    request_id: str = "",
+) -> list[dict[str, str]]:
+    """Single SearXNG query. Returns normalized result dicts."""
+    q = query.strip()
+    if not q:
+        return []
+
+    try:
+        response = await client.get(
+            f"{base_url}/search",
+            params={"q": q, "format": "json"},
+            timeout=SEARXNG_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        logger.warning(
+            "SearXNG query failed: query=%r, error=%s (request_id=%s)",
+            q,
+            type(exc).__name__,
+            request_id,
+        )
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in data.get("results", [])[:count]:
+        normalized.append(
+            {
+                "title": (item.get("title") or "").strip(),
+                "url": (item.get("url") or "").strip(),
+                "description": (
+                    item.get("content") or item.get("description") or ""
+                ).strip(),
+                "engine": (item.get("engine") or "").strip(),
+            }
+        )
+
+    return normalized
+
+
 async def gather_search_context(
     event_title: str, request_id: str = ""
 ) -> tuple[str, bool]:
     """
-    Runs 3 parallel Brave Search queries, deduplicates by URL, formats into
+    Runs 3 parallel SearXNG queries, deduplicates by URL, formats into
     a numbered context string for the LLM prompt.
 
     Returns (context_text, data_retrieval_available).
     Returns ("", False) on complete failure.
     """
-    if not settings.BRAVE_API_KEY:
+    base_url = settings.SEARXNG_BASE_URL.strip().rstrip("/")
+    if not base_url:
         logger.warning(
-            "BRAVE_API_KEY not set — skipping web search (request_id=%s)", request_id
+            "SEARXNG_BASE_URL not set — skipping web search (request_id=%s)",
+            request_id,
         )
         return "", False
 
@@ -68,18 +117,21 @@ async def gather_search_context(
 
     async with httpx.AsyncClient() as client:
         results_per_query = await asyncio.gather(
-            *[brave_search(client, q, request_id=request_id) for q in queries]
+            *[
+                searxng_search(client, q, base_url=base_url, request_id=request_id)
+                for q in queries
+            ]
         )
 
     # Deduplicate by URL, preserve order
     seen_urls: set[str] = set()
-    unique_results: list[dict] = []
+    unique_results: list[dict[str, str]] = []
     for results in results_per_query:
-        for r in results:
-            url = r.get("url", "")
+        for result in results:
+            url = result.get("url", "")
             if url and url not in seen_urls:
                 seen_urls.add(url)
-                unique_results.append(r)
+                unique_results.append(result)
                 if len(unique_results) >= MAX_CONTEXT_RESULTS:
                     break
         if len(unique_results) >= MAX_CONTEXT_RESULTS:
@@ -89,11 +141,11 @@ async def gather_search_context(
         return "", False
 
     lines: list[str] = []
-    for i, r in enumerate(unique_results, start=1):
-        title = r.get("title", "").strip()
-        url = r.get("url", "").strip()
-        description = r.get("description", "").strip()
-        lines.append(f"[{i}] {title}\n{url}\n{description}")
+    for index, result in enumerate(unique_results, start=1):
+        title = result.get("title", "")
+        url = result.get("url", "")
+        description = result.get("description", "")
+        lines.append(f"[{index}] {title}\n{url}\n{description}")
 
     context_text = "\n\n".join(lines)
 

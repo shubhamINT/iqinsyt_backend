@@ -26,7 +26,7 @@ FastAPI-based async research API that powers the IQinsyt Chrome extension. It ac
 ## Architecture Overview
 
 ```
-Chrome Extension ──HTTP──► FastAPI Backend ──► Brave Search API (web context)
+Chrome Extension ──HTTP──► FastAPI Backend ──► SearXNG (web context, active)
                               │
                               ├──► OpenAI GPT-4o-mini (structured analysis)
                               │
@@ -38,7 +38,7 @@ Chrome Extension ──HTTP──► FastAPI Backend ──► Brave Search API 
 The backend is the **AI research engine** of the IQinsyt platform. Its sole responsibility is:
 
 1. Receive an event/topic from the Chrome extension
-2. Gather real-time web context via Brave Search
+2. Gather real-time web context via SearXNG
 3. Generate neutral, factual analysis via GPT-4o-mini
 4. Enforce strict compliance rules to block predictive/biased language
 5. Return structured research with 7 defined sections
@@ -58,15 +58,19 @@ iqinsyt_backend/
 │   │   ├── server.py                 # App factory, middleware, lifespan, health
 │   │   └── v1/
 │   │       ├── __init__.py
-│   │       └── research.py           # POST /v1/research + Pydantic schemas
+│   │       ├── research.py           # POST /v1/research endpoint
+│   │       └── schemas.py           # Pydantic schemas: ResearchRequest, ResearchSections, APIResponse
 │   │
 │   ├── core/                         # Shared infrastructure
 │   │   ├── __init__.py
 │   │   ├── config.py                 # Pydantic Settings (reads .env)
-│   │   ├── database.py               # Beanie ODM documents, DB lifecycle
 │   │   ├── dependencies.py           # FastAPI Depends() — API key auth
 │   │   ├── exceptions.py             # Custom exception + error handlers
 │   │   └── logging_config.py         # ColoredFormatter, JsonFormatter, setup
+│   │
+│   ├── db/                           # Database lifecycle, models, hash helpers
+│   │   ├── __init__.py               # init/close MongoDB + cache/fingerprint helpers
+│   │   └── models.py                 # Beanie documents: research_cache/history
 │   │
 │   └── services/                     # Business logic
 │       ├── __init__.py
@@ -74,7 +78,7 @@ iqinsyt_backend/
 │       ├── compliance_service.py     # Neutrality enforcement (36 regex patterns)
 │       ├── llm_service.py            # OpenAI GPT-4o-mini integration
 │       ├── research_service.py       # Pipeline orchestrator
-│       └── search_service.py         # Brave Search API integration
+│       └── search_service.py         # SearXNG integration (Brave helper retained)
 │
 ├── .env                              # Local secrets (gitignored)
 ├── .env.example                      # Environment variable template
@@ -97,7 +101,7 @@ iqinsyt_backend/
 | **Server** | Gunicorn + Uvicorn workers (production) |
 | **Database** | MongoDB via Beanie ODM + Motor async driver |
 | **LLM** | OpenAI GPT-4o-mini (async SDK) |
-| **Web Search** | Brave Search API |
+| **Web Search** | SearXNG (active), Brave helper retained |
 | **HTTP Client** | httpx (async) |
 | **Settings** | pydantic-settings + python-dotenv |
 | **Package Manager** | uv |
@@ -110,7 +114,8 @@ iqinsyt_backend/
 - **MongoDB** — local or Atlas connection string
 - **API Keys**:
   - `OPENAI_API_KEY` — OpenAI account
-  - `BRAVE_API_KEY` — Brave Search account (free tier available)
+  - `SEARXNG_BASE_URL` — SearXNG endpoint URL (example: `http://localhost:8080`)
+  - `BRAVE_API_KEY` — Optional (Brave helper retained but currently inactive)
 
 ---
 
@@ -139,7 +144,8 @@ MONGODB_URL=mongodb://localhost:27017
 MONGODB_DB_NAME=iqinsyt
 API_KEY=your-secret-key-here
 OPENAI_API_KEY=sk-proj-...
-BRAVE_API_KEY=BSA...
+SEARXNG_BASE_URL=http://localhost:8080
+BRAVE_API_KEY=BSA...  # optional/inactive
 ```
 
 ### 3. Run the server
@@ -190,7 +196,8 @@ All configuration is managed through environment variables or a `.env` file. The
 | `MONGODB_DB_NAME` | `iqinsyt` | Database name |
 | `API_KEY` | `dev-key-change-me` | Shared secret for API auth (sent via `X-API-Key` header) |
 | `OPENAI_API_KEY` | `""` | OpenAI API key for GPT-4o-mini |
-| `BRAVE_API_KEY` | `""` | Brave Search API key |
+| `SEARXNG_BASE_URL` | `""` | SearXNG base URL (active web search provider) |
+| `BRAVE_API_KEY` | `""` | Optional Brave API key (helper retained, currently inactive) |
 | `APP_VERSION` | `0.1.0` | App version string |
 | `CORS_ORIGINS` | `chrome-extension://*,http://localhost:*` | Comma-separated allowed origins |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
@@ -203,6 +210,17 @@ All configuration is managed through environment variables or a `.env` file. The
 
 ## API Endpoints
 
+All responses use a unified envelope:
+
+```python
+# src/api/v1/schemas.py
+class APIResponse(BaseModel, Generic[T]):
+    success: bool
+    data: Optional[T] = None
+    request_id: str
+    timestamp: str  # ISO 8601
+```
+
 ### `GET /health`
 
 Health check — no authentication required.
@@ -210,9 +228,14 @@ Health check — no authentication required.
 **Response:**
 ```json
 {
-  "status": "ok",
-  "db": "ok",
-  "version": "0.1.0"
+  "success": true,
+  "data": {
+    "status": "ok",
+    "db": "ok",
+    "version": "0.1.0"
+  },
+  "request_id": "uuid-string",
+  "timestamp": "2025-04-01T12:00:00Z"
 }
 ```
 
@@ -224,6 +247,7 @@ Main research endpoint. Requires `X-API-Key` header.
 ```
 Content-Type: application/json
 X-API-Key: <your-api-key>
+Accept: text/event-stream
 ```
 
 **Request Body:**
@@ -235,38 +259,55 @@ X-API-Key: <your-api-key>
 }
 ```
 
-**Response:**
-```json
-{
-  "requestId": "uuid-string",
-  "cached": false,
-  "cachedAt": null,
-  "sections": {
-    "eventSummary": "...",
-    "keyVariables": "...",
-    "historicalContext": "...",
-    "currentDrivers": "...",
-    "riskFactors": "...",
-    "dataConfidence": "...",
-    "dataGaps": "..."
+**Response (SSE stream):**
+```text
+event: research.started
+data: {"request_id":"uuid-string","stage":"request.accepted","message":"Research request accepted"}
+
+event: research.progress
+data: {"request_id":"uuid-string","stage":"cache.lookup.started","message":"Checking cache for existing research"}
+
+...
+
+event: research.completed
+data: {
+  "success": true,
+  "data": {
+    "cached": false,
+    "cachedAt": null,
+    "sections": {
+      "eventSummary": "...",
+      "keyVariables": "...",
+      "historicalContext": "...",
+      "currentDrivers": "...",
+      "riskFactors": "...",
+      "dataConfidence": "...",
+      "dataGaps": "..."
+    },
+    "dataRetrievalAvailable": true,
+    "generatedAt": "2025-04-01T12:00:00Z"
   },
-  "dataRetrievalAvailable": true,
-  "generatedAt": "2025-04-01T12:00:00Z"
-}
-```
-
-**Error Responses:**
-
-All errors include `error`, `message`, `request_id`, and `timestamp`:
-
-```json
-{
-  "error": "INVALID_API_KEY",
-  "message": "Invalid or missing API key.",
   "request_id": "uuid-string",
   "timestamp": "2025-04-01T12:00:00Z"
 }
 ```
+
+**Error Responses (SSE):**
+
+On failures, the stream emits `event: research.error` with:
+
+```json
+{
+  "success": false,
+  "error": "INVALID_API_KEY",
+  "message": "Invalid or missing API key.",
+  "status_code": 401,
+  "request_id": "uuid-string",
+  "timestamp": "2025-04-01T12:00:00Z"
+}
+```
+
+HTTP status is `200` for a successfully opened stream; use `status_code` in `research.error` for failure semantics.
 
 | Status | Error Code | Cause |
 |--------|-----------|-------|
@@ -294,53 +335,49 @@ Step 1: Cache Lookup
             │
             ▼
 Step 2: Web Search
-    Run 3 parallel Brave Search queries: "{title} news", "{title} analysis", "{title} preview"
+    Run 3 parallel SearXNG queries: "{title} news", "{title} analysis", "{title} preview"
     Deduplicate by URL, cap at 6 results, cap text at 9,000 chars
     │
     ▼
-Step 3+4: Compliant LLM Pipeline
-    Assemble prompt with system prompt + section instructions + negative constraints
-    Call GPT-4o-mini (8s timeout, temperature 0.2, JSON output)
-    Scan output against 36 compliance regex patterns
+Step 3: LLM Generation
+    Assemble prompt (system prompt with BAD/GOOD examples + per-section instructions)
+    Stream OpenAI Responses API (8s timeout, temperature 0.2, JSON output)
+    Neutrality enforced by prompt design — no post-generation scanning
     │
-    ├── PASS → Return sections
+    ├── SUCCESS → Return sections dict
     │
-    ├── FAIL (attempt < 3) → Retry with violated phrases added as "avoid these" constraints
-    │
-    └── FAIL (attempt 3) → Per-section quarantine (keep compliant sections, placeholder the rest)
+    └── FAILURE (None returned) → raise 503 IQinsytException
             │
             ▼
-Step 5: Total Failure Check
-    If ALL sections are placeholders → raise 503 IQinsytException
-    │
-    ▼
-Step 6: Persist
+Step 4: Persist
     Parallel write: cache update + history record
     │
     ▼
-Step 7: Return ResearchResponse
+Step 5: Return response payload
 ```
 
 ---
 
 ## Compliance & Neutrality
 
-The compliance engine (`src/services/compliance_service.py`) ensures all research output is neutral, factual, and free of predictive or biased language.
+Neutrality is enforced entirely through prompt design — no post-generation scanning or retry loops.
 
 ### How It Works
 
-1. LLM generates 7 research sections as JSON
-2. Each section is scanned against **36 regex patterns** across 4 categories:
-   - **Predictive language**: "likely to", "expected to", "odds favour", "probability of", "forecast", etc.
-   - **Recommendation language**: "consider backing", "worth backing", "good pick", "strong case for", etc.
-   - **Emotionally charged language**: "dominant", "unstoppable", "inevitably", "sure to", "guaranteed", etc.
-   - **Outcome ranking**: "favourite", "underdog", "has the edge", "stronger team", etc.
-3. If violations found, the LLM retries (up to 3 attempts) with violated phrases fed back as "avoid these" constraints
-4. After 3 failed attempts, **per-section quarantine** is applied — compliant sections are kept, violating sections are replaced with `"[Section unavailable — compliance filter applied]"`
+The system prompt in `src/services/llm_service.py` instructs the model with:
+- **Role framing**: the model understands it is a fact compiler for prediction market traders, not an advisor
+- **BAD/GOOD examples** for each violation category — showing the rewrite, not just listing banned words:
+  - Predictive language: `"likely to win"` → `"has won 5 of last 6 matches"`
+  - Probability language: `"more likely"` → `"leads in 3 of 5 polls"`
+  - Ranking language: `"favourite"` → `"finished 1st in conference with +34 GD"`
+  - Recommendation language: `"worth backing"` → `"has not lost at this venue in 14 matches"`
+  - Absolute language: `"guaranteed to"` → `"all 12 surveyed economists forecast..."`
+- **Per-section BAD/GOOD examples** in the user prompt, so the model knows exactly what tone to use in each section
+- **Self-check instruction**: the model is told to read each sentence and ask "does this state a fact, or imply what will happen?" before responding
 
-### Why This Matters
+### Why This Approach
 
-The Chrome extension is used for prediction market research. The output must be purely informational — never suggesting which outcome to bet on, never predicting winners, never using emotionally charged language.
+Post-generation regex scanning was a symptom fix. A precisely written prompt with concrete examples is more reliable — the model learns the *reasoning* behind neutrality, not just a list of banned words. This also eliminates retry latency and enables direct SSE token streaming to the frontend.
 
 ---
 
@@ -381,7 +418,7 @@ The architecture spec (`architecture_backend.md`) describes a full JWT-based aut
 - **TTL**: 4 hours
 - **Key**: `sha256(title)[:16]:YYYY-MM-DD`
 - **Mechanism**: MongoDB TTL index on `expires_at` field auto-deletes expired documents
-- **Behavior**: On cache hit, returns immediately without calling Brave Search or LLM
+- **Behavior**: On cache hit, returns immediately without calling SearXNG or LLM
 
 ```python
 # Cache key example
@@ -394,11 +431,13 @@ The architecture spec (`architecture_backend.md`) describes a full JWT-based aut
 The architecture spec describes a more sophisticated caching strategy:
 1. **Redis** — exact-match cache (fast, sub-millisecond)
 2. **Pinecone** — semantic similarity cache (fuzzy match for similar topics)
-3. **Full pipeline** — Brave Search + LLM (fallback)
+3. **Full pipeline** — SearXNG + LLM (fallback)
 
 ---
 
 ## Database Schema
+
+Beanie document models are defined in `src/db/models.py`. Connection lifecycle (`init_db`, `close_db`) and hashing helpers (`make_cache_key`, `user_fingerprint`) are defined in `src/db/__init__.py`.
 
 ### `research_cache`
 
@@ -504,7 +543,7 @@ ruff format src/
 - **Async-first**: All I/O operations use async/await
 - **No blocking calls**: Use `asyncio.wait_for()` for timeouts
 - **Fire-and-forget**: Non-critical writes (history) use `asyncio.create_task()` without await
-- **Graceful degradation**: Missing API keys skip features rather than crash (e.g., no Brave key → skip web search, LLM still works with general knowledge)
+- **Graceful degradation**: Missing search config skips web retrieval without crashing (e.g., no `SEARXNG_BASE_URL` → skip web search, LLM still works with general knowledge)
 - **Concise logging**: Log metadata only (titles, IDs, error types) — never dump full payloads, context text, or LLM responses
 
 ---
@@ -530,7 +569,8 @@ This runs Gunicorn with:
 MONGODB_URL=mongodb+srv://user:pass@cluster.mongodb.net/
 API_KEY=<strong-random-key>
 OPENAI_API_KEY=sk-proj-...
-BRAVE_API_KEY=BSA...
+SEARXNG_BASE_URL=https://your-searxng-instance.example
+BRAVE_API_KEY=BSA...  # optional/inactive
 LOG_LEVEL=INFO
 LOG_JSON_FORMAT=true
 CORS_ORIGINS=https://yourdomain.com,chrome-extension://your-extension-id
