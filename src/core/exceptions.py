@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger("app.exceptions")
@@ -24,6 +24,7 @@ def _error_response(
     return JSONResponse(
         status_code=status_code,
         content={
+            "success": False,
             "error": error,
             "message": message,
             "request_id": request_id,
@@ -46,6 +47,29 @@ def register_exception_handlers(app: FastAPI) -> None:
             exc.request_id,
         )
         return _error_response(exc.status_code, exc.error, exc.message, exc.request_id)
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "")
+        detail = exc.detail
+        # detail may be a dict (e.g. from get_api_key) or a plain string
+        if isinstance(detail, dict):
+            error = detail.get("error", "HTTP_ERROR")
+            message = detail.get("message", str(exc.detail))
+        else:
+            error = "HTTP_ERROR"
+            message = str(detail)
+        logger.warning(
+            "HTTP error: method=%s, path=%s, status=%s, error=%s, request_id=%s",
+            request.method,
+            request.url.path,
+            exc.status_code,
+            error,
+            request_id,
+        )
+        return _error_response(exc.status_code, error, message, request_id)
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(

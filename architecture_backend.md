@@ -481,7 +481,7 @@ Submit a payload (text detected on a page) and receive a 7-section research resu
 |---|---|
 | Auth required | Yes |
 | Request body | `ResearchRequest` |
-| Response body | `ResearchResponse` |
+| Response body | `APIResponse[ResearchResponse]` |
 | Success code | `200 OK` |
 
 ```python
@@ -502,12 +502,19 @@ class ResearchSections(BaseModel):
     dataGaps: str
 
 class ResearchResponse(BaseModel):
-    requestId: str
     cached: bool
     cachedAt: Optional[str] = None      # ISO 8601 if cached
     sections: ResearchSections
     dataRetrievalAvailable: bool
     generatedAt: str                    # ISO 8601
+
+
+# API Response Envelope (all endpoints)
+class APIResponse(BaseModel, Generic[T]):
+    success: bool
+    data: Optional[T] = None
+    request_id: str
+    timestamp: str                       # ISO 8601
 ```
 
 | HTTP Code | Reason |
@@ -530,7 +537,7 @@ Submit a specific section of a previous research result for deeper analysis. Tri
 |---|---|
 | Auth required | Yes |
 | Request body | `DeepResearchRequest` |
-| Response body | `ResearchResponse` |
+| Response body | `APIResponse[ResearchResponse]` |
 | Success code | `200 OK` |
 
 ```python

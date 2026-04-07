@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from src.api.v1.research import ResearchRequest, ResearchResponse, ResearchSections
+from src.api.v1.schemas import ResearchRequest, ResearchResponse, ResearchSections
 from src.core.database import ResearchHistory, user_fingerprint
 from src.core.exceptions import IQinsytException
 from src.services.cache_service import get_cached_research, set_cached_research
@@ -39,7 +39,6 @@ async def run_research_pipeline(
         )
 
         return ResearchResponse(
-            requestId=request_id,
             cached=True,
             cachedAt=cached.generated_at.isoformat(),
             sections=sections,
@@ -99,7 +98,6 @@ async def run_research_pipeline(
 
     # ── Step 7: Return ───────────────────────────────────────────────────────
     return ResearchResponse(
-        requestId=request_id,
         cached=False,
         cachedAt=None,
         sections=ResearchSections(**sections_dict),

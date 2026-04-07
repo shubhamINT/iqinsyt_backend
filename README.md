@@ -58,7 +58,8 @@ iqinsyt_backend/
 │   │   ├── server.py                 # App factory, middleware, lifespan, health
 │   │   └── v1/
 │   │       ├── __init__.py
-│   │       └── research.py           # POST /v1/research + Pydantic schemas
+│   │       ├── research.py           # POST /v1/research endpoint
+│   │       └── schemas.py           # Pydantic schemas: ResearchRequest, ResearchSections, ResearchResponse, APIResponse
 │   │
 │   ├── core/                         # Shared infrastructure
 │   │   ├── __init__.py
@@ -203,6 +204,17 @@ All configuration is managed through environment variables or a `.env` file. The
 
 ## API Endpoints
 
+All responses use a unified envelope:
+
+```python
+# src/api/v1/schemas.py
+class APIResponse(BaseModel, Generic[T]):
+    success: bool
+    data: Optional[T] = None
+    request_id: str
+    timestamp: str  # ISO 8601
+```
+
 ### `GET /health`
 
 Health check — no authentication required.
@@ -238,29 +250,34 @@ X-API-Key: <your-api-key>
 **Response:**
 ```json
 {
-  "requestId": "uuid-string",
-  "cached": false,
-  "cachedAt": null,
-  "sections": {
-    "eventSummary": "...",
-    "keyVariables": "...",
-    "historicalContext": "...",
-    "currentDrivers": "...",
-    "riskFactors": "...",
-    "dataConfidence": "...",
-    "dataGaps": "..."
+  "success": true,
+  "data": {
+    "cached": false,
+    "cachedAt": null,
+    "sections": {
+      "eventSummary": "...",
+      "keyVariables": "...",
+      "historicalContext": "...",
+      "currentDrivers": "...",
+      "riskFactors": "...",
+      "dataConfidence": "...",
+      "dataGaps": "..."
+    },
+    "dataRetrievalAvailable": true,
+    "generatedAt": "2025-04-01T12:00:00Z"
   },
-  "dataRetrievalAvailable": true,
-  "generatedAt": "2025-04-01T12:00:00Z"
+  "request_id": "uuid-string",
+  "timestamp": "2025-04-01T12:00:00Z"
 }
 ```
 
 **Error Responses:**
 
-All errors include `error`, `message`, `request_id`, and `timestamp`:
+All errors include `success: false`, `error`, `message`, `request_id`, and `timestamp`:
 
 ```json
 {
+  "success": false,
   "error": "INVALID_API_KEY",
   "message": "Invalid or missing API key.",
   "request_id": "uuid-string",

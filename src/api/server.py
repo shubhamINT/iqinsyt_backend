@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.v1.schemas import APIResponse
 from src.core.config import settings
 from src.core.database import init_db, close_db
 from src.core.exceptions import register_exception_handlers
@@ -58,7 +59,7 @@ app.include_router(research_router, prefix="/v1")
 
 # Health check
 @app.get("/health", tags=["health"])
-async def health():
+async def health(request: Request) -> APIResponse[dict]:
     from src.core.database import _mongo_client
 
     db_status = "ok"
@@ -74,8 +75,8 @@ async def health():
     status = "ok" if db_status == "ok" else "degraded"
     logger.info("Health check: status=%s, db=%s", status, db_status)
 
-    return {
-        "status": status,
-        "db": db_status,
-        "version": settings.APP_VERSION,
-    }
+    return APIResponse(
+        success=status == "ok",
+        data={"status": status, "db": db_status, "version": settings.APP_VERSION},
+        request_id=request.state.request_id,
+    )
