@@ -6,7 +6,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from src.core.config import settings
-from src.services.prompts import REQUIRED_KEYS, SECTION_INSTRUCTIONS, SYSTEM_PROMPT
+from src.services.llm.prompts import REQUIRED_KEYS, SECTION_INSTRUCTIONS, SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 

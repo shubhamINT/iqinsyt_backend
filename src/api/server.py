@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.v1.schemas import APIResponse
 from src.core.config import settings
-from src.db import init_db, close_db
+from src.db.client import init_db, close_db
 from src.core.exceptions import register_exception_handlers
 from src.core.logging_config import setup_logging, get_logger
 from src.api.v1.research import router as research_router
@@ -60,7 +60,7 @@ app.include_router(research_router, prefix="/v1")
 # Health check
 @app.get("/health", tags=["health"])
 async def health(request: Request) -> APIResponse[dict]:
-    from src.db import _mongo_client
+    from src.db.client import _mongo_client
 
     db_status = "ok"
     try:

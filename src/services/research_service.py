@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from src.api.v1.schemas import ResearchRequest, ResearchSections
-from src.db import ResearchHistory, user_fingerprint
+from src.db.models import ResearchHistory
+from src.db.helpers import user_fingerprint
 from src.core.exceptions import IQinsytException
-from src.services.cache_service import get_cached_research, set_cached_research
-from src.services.llm_service import generate_sections
-from src.services.search_service import gather_search_context
+from src.services.cache.mongo import get_cached_research, set_cached_research
+from src.services.llm.openai import generate_sections
+from src.services.search.service import gather_search_context
 
 logger = logging.getLogger(__name__)
 
