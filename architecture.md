@@ -2,7 +2,7 @@
 
 > **Scope:** This document covers the Chrome extension only — its structure, frontend, backend integration, AI pipeline, data flow, and everything a developer needs to build it from scratch. The web app is a separate deliverable.
 >
-> **Current backend alignment:** this repository currently exposes `POST /v1/research` and `GET /health` with API-key auth (`X-API-Key`) from `src/api/server.py`. JWT-based extension login endpoints are planned and tracked in `architecture_backend.md`.
+> **Current backend alignment:** this repository currently exposes `POST /v1/research`, `POST /v1/research/deepdown`, and `GET /health` from `src/api/server.py`. The research endpoints are SSE streams. The intended client contract uses `X-API-Key`, although the current `/v1/research` route implementation has request-time API-key validation temporarily bypassed in code. JWT-based extension login endpoints are still planned and tracked in `architecture_backend.md`.
 
 ---
 

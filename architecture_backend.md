@@ -1,129 +1,83 @@
-# IQinsyt Backend API — Full Architecture & Developer Guide
+# IQinsyt Backend API — Current Implementation + Target Architecture
 
-> **Scope:** This document covers the Python/FastAPI backend server only — its structure, database schema, AI pipeline, auth system, compliance layer, caching strategy, and everything a developer needs to build it from scratch. The Chrome extension is documented separately in `architecture.md`. The web app frontend is a separate deliverable.
+> **Scope:** This document covers the Python/FastAPI backend server only. It now serves two purposes:
+> 1. document the backend that is actually implemented in this repository today
+> 2. keep the broader target architecture visible for future auth/billing/user-platform work
+>
+> The Chrome extension is documented separately in `architecture.md`. The web app frontend is a separate deliverable.
 
 ---
 
 ## Table of Contents
 
 1. [What Is This Backend?](#1-what-is-this-backend)
-2. [High-Level Architecture](#2-high-level-architecture)
-3. [Project Structure](#3-project-structure)
-4. [API Endpoints — Full Specification](#4-api-endpoints--full-specification)
-5. [Auth Module](#5-auth-module)
-6. [Research Module — The AI Pipeline](#6-research-module--the-ai-pipeline)
-7. [Neutrality & Compliance Module](#7-neutrality--compliance-module)
-8. [Database Schema](#8-database-schema)
-9. [Redis Schema](#9-redis-schema)
-10. [Pinecone Schema](#10-pinecone-schema)
-11. [Rate Limiting](#11-rate-limiting)
-12. [Caching Strategy](#12-caching-strategy)
-13. [Error Handling](#13-error-handling)
-14. [Environment Variables](#14-environment-variables)
-15. [Build & Development Setup](#15-build--development-setup)
-16. [Deployment](#16-deployment)
-17. [Testing Strategy](#17-testing-strategy)
+2. [Current Implementation Snapshot](#2-current-implementation-snapshot)
+3. [Current Project Structure](#3-current-project-structure)
+4. [Current API Surface](#4-current-api-surface)
+5. [Current Research Pipeline](#5-current-research-pipeline)
+6. [Current Database Schema](#6-current-database-schema)
+7. [Current Environment Variables](#7-current-environment-variables)
+8. [Target Architecture (Planned)](#8-target-architecture-planned)
 
 ---
 
 ## 1. What Is This Backend?
 
-The IQinsyt backend is a **Python 3.12 / FastAPI async REST API** that powers both the IQinsyt Chrome extension and the IQinsyt web app. It receives event queries, orchestrates a multi-step AI research pipeline, enforces a mandatory neutrality compliance layer, and returns structured 7-section research output.
+The IQinsyt backend is a **Python 3.12 / FastAPI async API** that currently powers the research experience for IQinsyt clients. It receives event queries, gathers search context, streams structured section updates over SSE, persists cache/history in MongoDB, and returns neutral 7-section research output.
 
-**What it IS:**
-- An async API server built for sub-5-second end-to-end latency on uncached requests
-- An orchestration layer across Redis, Pinecone, Brave Search, Firecrawl, and OpenAI
-- A compliance enforcement system that guarantees neutral, non-predictive output
-- A subscription and billing management layer via Stripe
+**What it IS today:**
+- An async FastAPI service with SSE streaming responses
+- A research orchestration layer across SearXNG, OpenAI Responses API, and MongoDB
+- A prompt-driven neutrality system that constrains the model to factual, non-predictive output
+- A cache/history service for repeated research requests and traceability
 
-**What it is NOT:**
+**What it is NOT today:**
 - Not a prediction engine — it never returns odds, probabilities, or outcome rankings
-- Not a web scraper (it delegates scraping to Firecrawl)
-- Not a search engine (it delegates search to Brave)
-- Not responsible for rendering UI — it returns JSON only
-- Not a real-time streaming service — all responses are synchronous JSON payloads
-- Not a stateful session server — all state lives in MongoDB, Redis, or Pinecone
+- Not a billing or user-account platform
+- Not a Brave/Firecrawl/Redis/Pinecone stack
+- Not a synchronous JSON-only API; the main research flows are SSE streams
+- Not a complete JWT-auth backend yet
 
 ---
 
-## 2. High-Level Architecture
+## 2. Current Implementation Snapshot
 
 ```
-                    CLIENTS
-        ┌────────────────────────────┐
-        │  Chrome Extension          │  Chrome extension (Manifest V3)
-        │  Web App (React)           │  Browser SPA
-        └───────────┬────────────────┘
-                    │ HTTPS + JWT (Bearer token)
-                    ▼
-        ┌───────────────────────────────┐
-        │         FastAPI App           │
-        │  (Python 3.12, uvicorn/       │
-        │   gunicorn, async)            │
-        │                               │
-        │  ┌─────────────────────────┐  │
-        │  │   Middleware Stack       │  │
-        │  │   - CORS                 │  │
-        │  │   - Request ID inject    │  │
-        │  │   - Rate limit (Redis)   │  │
-        │  │   - JWT validation       │  │
-        │  └────────────┬────────────┘  │
-        │               │               │
-        │  ┌────────────▼────────────┐  │
-        │  │       Routers           │  │
-        │  │  /v1/auth    /v1/user   │  │
-        │  │  /v1/research /v1/billing│  │
-        │  └────────────┬────────────┘  │
-        │               │               │
-        │  ┌────────────▼────────────┐  │
-        │  │       Services          │  │
-        │  │  ResearchService         │  │
-        │  │  AuthService            │  │
-        │  │  BillingService         │  │
-        │  │  ComplianceService      │  │
-        │  └────────────┬────────────┘  │
-        └───────────────┼───────────────┘
-                        │
-        ┌───────────────┼──────────────────────────────────┐
-        │               │  EXTERNAL SERVICES               │
-        │               │                                  │
-        │    ┌──────────▼──────────┐                       │
-        │    │    MongoDB           │  Users, tokens,       │
-        │    │    (primary DB)      │  history, audit log   │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │    Redis             │  Cache, rate limits,  │
-        │    │    (cache/counters)  │  auth codes           │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │    Pinecone          │  Semantic vector      │
-        │    │    (vector DB)       │  similarity search    │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │  Brave Search API   │  Public web search    │
-        │    │  (via httpx)        │                       │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │  Firecrawl SDK      │  Webpage scraping     │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │  OpenAI Python SDK  │  GPT-4o / GPT-4o-mini │
-        │    └─────────────────────┘                       │
-        │                                                  │
-        │    ┌─────────────────────┐                       │
-        │    │  Stripe Python SDK  │  Subscription billing │
-        │    └─────────────────────┘                       │
-        └──────────────────────────────────────────────────┘
+Clients
+  └── Chrome extension / frontend
+         └── POST /v1/research (SSE)
+         └── POST /v1/research/deepdown (SSE)
+         └── GET /health
+
+FastAPI app
+  ├── lifespan startup/shutdown
+  ├── request-id middleware
+  ├── CORS middleware
+  └── v1 router
+
+Services
+  ├── search.service        -> fans out 3 SearXNG queries
+  ├── llm.openai            -> OpenAI Responses API + web_search_preview
+  ├── research_service      -> cache/search/LLM/persist orchestration
+  ├── deepdown_service      -> section-level markdown deep-dive
+  └── cache.mongo           -> MongoDB TTL cache helpers
+
+Persistence
+  └── MongoDB via Beanie
+         ├── research_cache
+         └── research_history
 ```
 
 ---
 
-## 3. Project Structure
+### Current implementation notes
+
+- `POST /v1/research` streams `research.started`, `research.progress`, `research.section_delta`, `research.completed`, and `research.error`.
+- `POST /v1/research/deepdown` streams `deepdown.started`, `deepdown.delta`, `deepdown.completed`, and `deepdown.error`.
+- Search context is prefetched from SearXNG, then the OpenAI Responses API can additionally use `web_search_preview` during generation.
+- The main route currently has API-key validation commented out and injects a placeholder key in-process. `src/core/dependencies.py` still contains the intended `X-API-Key` validation dependency.
+
+## 3. Current Project Structure
 
 ### Current implementation (as of April 2026)
 
@@ -141,18 +95,114 @@ iqinsyt_backend/
 │   │   ├── exceptions.py
 │   │   └── logging_config.py
 │   ├── db/
-│   │   ├── __init__.py               # init_db/close_db + cache/fingerprint helpers
+│   │   ├── client.py                 # init_db/close_db
+│   │   ├── helpers.py                # cache key + API-key fingerprint helpers
 │   │   └── models.py                 # ResearchCache + ResearchHistory documents
 │   └── services/
-│       ├── cache_service.py
-│       ├── compliance_service.py
-│       ├── llm_service.py
+│       ├── cache/
+│       │   └── mongo.py
+│       ├── deepdown_service.py
+│       ├── llm/
+│       │   ├── openai.py
+│       │   └── prompts.py
 │       ├── research_service.py
-│       └── search_service.py
+│       └── search/
+│           ├── brave.py
+│           ├── searxng.py
+│           └── service.py
 └── server_run.py
 ```
 
-Note: the database module is now centralized under `src/db/`. The old `src/core/database.py` file has been removed.
+## 4. Current API Surface
+
+### Implemented endpoints
+
+#### `GET /health`
+
+- Returns an `APIResponse` envelope with backend/db status.
+- No authentication.
+
+#### `POST /v1/research`
+
+- Request body: `eventTitle`, `eventSource`, `timestamp`, optional `redo`.
+- Response type: `text/event-stream`.
+- Events:
+  - `research.started`
+  - `research.progress`
+  - `research.section_delta`
+  - `research.completed`
+  - `research.error`
+
+#### `POST /v1/research/deepdown`
+
+- Request body: `sectionTitle`, `sectionContent`.
+- Response type: `text/event-stream`.
+- Events:
+  - `deepdown.started`
+  - `deepdown.delta`
+  - `deepdown.completed`
+  - `deepdown.error`
+
+### Current auth reality
+
+- Intended contract: `X-API-Key` validated by `src/core/dependencies.py`.
+- Current code path: `src/api/v1/research.py` has that dependency commented out and passes a placeholder API key into the pipeline. This is development-state behavior, not the intended production design.
+
+## 5. Current Research Pipeline
+
+1. Check MongoDB TTL cache unless `redo=true`.
+2. On cache miss, run 3 parallel SearXNG queries for `news`, `analysis`, and `preview`.
+3. Build prompt content from search context plus section instructions in `src/services/llm/prompts.py`.
+4. Stream the OpenAI Responses API with a strict function tool and optional `web_search_preview`.
+5. Emit `research.section_delta` events as function-call arguments grow.
+6. Persist cache + history in parallel.
+7. Return final `research.completed` envelope.
+
+Neutrality is currently enforced by prompt design and structured output constraints, not by a separate regex retry service.
+
+## 6. Current Database Schema
+
+The implemented documents are:
+
+- `research_cache`
+  - unique `cache_key`
+  - `event_title`
+  - `request_id`
+  - `sections`
+  - `data_retrieval_available`
+  - `generated_at`
+  - `expires_at` with TTL index
+- `research_history`
+  - `user_fingerprint`
+  - `event_title`
+  - `event_source`
+  - `request_id`
+  - `cached`
+  - `data_retrieval_available`
+  - `sections`
+  - `generated_at`
+  - `created_at`
+
+## 7. Current Environment Variables
+
+- `MONGODB_URL`
+- `MONGODB_DB_NAME`
+- `API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_WEB_SEARCH_ENABLED`
+- `SEARXNG_BASE_URL`
+- `BRAVE_API_KEY`
+- `APP_VERSION`
+- `CORS_ORIGINS`
+- `LOG_LEVEL`
+- `LOG_JSON_FORMAT`
+- `LOG_FILE`
+- `LOG_MAX_BYTES`
+- `LOG_BACKUP_COUNT`
+
+## 8. Target Architecture (Planned)
+
+The remainder of this document describes the larger target architecture for auth, billing, user accounts, and platform services. Those sections are planning material, not a description of the currently implemented repository state.
 
 ### Planned full structure (target architecture)
 
@@ -1468,7 +1518,7 @@ Audit logs are **never deleted**. They are append-only and serve as the complian
 
 MongoDB is the primary database. All documents use Beanie ODM (built on Motor, the async MongoDB driver). No migrations are needed — MongoDB is schemaless. Indexes are declared on the model and created at startup via `init_beanie()`.
 
-Current code status: the live implementation keeps DB lifecycle and helper functions in `src/db/__init__.py`, and the active document models in `src/db/models.py` (`ResearchCache`, `ResearchHistory`).
+Current code status: the live implementation keeps DB lifecycle in `src/db/client.py`, helper functions in `src/db/helpers.py`, and the active document models in `src/db/models.py` (`ResearchCache`, `ResearchHistory`).
 
 ### 8.1 Beanie Initialization
 

@@ -1,6 +1,6 @@
 # IQinsyt Backend
 
-FastAPI-based async research API that powers the IQinsyt Chrome extension. It accepts event/topic titles, performs real-time web searches, generates neutral structured analysis via GPT-4o-mini, and enforces a strict compliance layer to prevent predictive or biased language.
+FastAPI-based async research API that powers the IQinsyt Chrome extension. It accepts event/topic titles, performs real-time web searches, streams section-level updates over SSE, generates neutral structured analysis via GPT-4o-mini plus OpenAI web search, and stores cache/history in MongoDB.
 
 ## Table of Contents
 
@@ -26,13 +26,14 @@ FastAPI-based async research API that powers the IQinsyt Chrome extension. It ac
 ## Architecture Overview
 
 ```
-Chrome Extension ──HTTP──► FastAPI Backend ──► SearXNG (web context, active)
-                              │
-                              ├──► OpenAI GPT-4o-mini (structured analysis)
-                              │
-                              ├──► Compliance Engine (36 regex patterns, 3-attempt loop)
-                              │
-                              └──► MongoDB (cache + history)
+Chrome Extension / Frontend ──HTTP/SSE──► FastAPI Backend
+                                            │
+                                            ├──► SearXNG (prefetched web context)
+                                            │
+                                            ├──► OpenAI GPT-4o-mini + web_search_preview
+                                            │      └── emits section deltas during generation
+                                            │
+                                            └──► MongoDB (cache + history)
 ```
 
 The backend is the **AI research engine** of the IQinsyt platform. Its sole responsibility is:
@@ -40,9 +41,10 @@ The backend is the **AI research engine** of the IQinsyt platform. Its sole resp
 1. Receive an event/topic from the Chrome extension
 2. Gather real-time web context via SearXNG
 3. Generate neutral, factual analysis via GPT-4o-mini
-4. Enforce strict compliance rules to block predictive/biased language
+4. Enforce neutrality through prompt design and output constraints
 5. Return structured research with 7 defined sections
-6. Cache results for 4 hours to avoid redundant work
+6. Stream progress and section deltas over SSE
+7. Cache results for 4 hours to avoid redundant work
 
 ---
 
@@ -51,34 +53,35 @@ The backend is the **AI research engine** of the IQinsyt platform. Its sole resp
 ```
 iqinsyt_backend/
 ├── src/
-│   ├── __init__.py
-│   │
-│   ├── api/                          # HTTP layer (FastAPI routes)
-│   │   ├── __init__.py
+│   ├── api/
 │   │   ├── server.py                 # App factory, middleware, lifespan, health
 │   │   └── v1/
-│   │       ├── __init__.py
-│   │       ├── research.py           # POST /v1/research endpoint
-│   │       └── schemas.py           # Pydantic schemas: ResearchRequest, ResearchSections, APIResponse
+│   │       ├── research.py           # SSE endpoints: /v1/research + /v1/research/deepdown
+│   │       └── schemas.py            # Pydantic schemas: ResearchRequest, DeepDownRequest, APIResponse
 │   │
-│   ├── core/                         # Shared infrastructure
-│   │   ├── __init__.py
+│   ├── core/
 │   │   ├── config.py                 # Pydantic Settings (reads .env)
-│   │   ├── dependencies.py           # FastAPI Depends() — API key auth
+│   │   ├── dependencies.py           # API-key dependency (currently not wired into route)
 │   │   ├── exceptions.py             # Custom exception + error handlers
 │   │   └── logging_config.py         # ColoredFormatter, JsonFormatter, setup
 │   │
-│   ├── db/                           # Database lifecycle, models, hash helpers
-│   │   ├── __init__.py               # init/close MongoDB + cache/fingerprint helpers
+│   ├── db/
+│   │   ├── client.py                 # init_db/close_db
+│   │   ├── helpers.py                # cache key + API-key fingerprint helpers
 │   │   └── models.py                 # Beanie documents: research_cache/history
 │   │
-│   └── services/                     # Business logic
-│       ├── __init__.py
-│       ├── cache_service.py          # MongoDB 4-hour TTL cache
-│       ├── compliance_service.py     # Neutrality enforcement (36 regex patterns)
-│       ├── llm_service.py            # OpenAI GPT-4o-mini integration
-│       ├── research_service.py       # Pipeline orchestrator
-│       └── search_service.py         # SearXNG integration (Brave helper retained)
+│   └── services/
+│       ├── cache/
+│       │   └── mongo.py              # MongoDB 4-hour TTL cache
+│       ├── deepdown_service.py       # Section-level deep-dive pipeline
+│       ├── llm/
+│       │   ├── openai.py             # OpenAI Responses API + section streaming
+│       │   └── prompts.py            # System prompts / section rules
+│       ├── research_service.py       # Main research pipeline orchestrator
+│       └── search/
+│           ├── brave.py              # Legacy helper retained
+│           ├── searxng.py            # SearXNG transport
+│           └── service.py            # Query fan-out + context assembly
 │
 ├── .env                              # Local secrets (gitignored)
 ├── .env.example                      # Environment variable template
@@ -196,6 +199,7 @@ All configuration is managed through environment variables or a `.env` file. The
 | `MONGODB_DB_NAME` | `iqinsyt` | Database name |
 | `API_KEY` | `dev-key-change-me` | Shared secret for API auth (sent via `X-API-Key` header) |
 | `OPENAI_API_KEY` | `""` | OpenAI API key for GPT-4o-mini |
+| `OPENAI_WEB_SEARCH_ENABLED` | `true` | Enables the OpenAI `web_search_preview` tool during generation |
 | `SEARXNG_BASE_URL` | `""` | SearXNG base URL (active web search provider) |
 | `BRAVE_API_KEY` | `""` | Optional Brave API key (helper retained, currently inactive) |
 | `APP_VERSION` | `0.1.0` | App version string |
@@ -255,7 +259,8 @@ Accept: text/event-stream
 {
   "eventTitle": "string (1-500 chars)",
   "eventSource": "string (1-253 chars)",
-  "timestamp": 0          // Unix milliseconds from the extension
+  "timestamp": 0,         // Unix milliseconds from the extension
+  "redo": false           // optional; bypass cache when true
 }
 ```
 
@@ -324,8 +329,32 @@ HTTP status is `200` for a successfully opened stream; use `status_code` in `res
 |--------|-----------|-------|
 | 401 | `INVALID_API_KEY` | Missing or wrong `X-API-Key` header |
 | 422 | — | Invalid request body (Pydantic validation) |
-| 503 | `LLM_UNAVAILABLE` | All LLM attempts returned compliance-blocked sections |
+| 503 | `LLM_UNAVAILABLE` | LLM returned no usable structured result |
 | 500 | `INTERNAL_ERROR` | Unexpected server error |
+
+### `POST /v1/research/deepdown`
+
+Section-level deep-dive endpoint. Returns an SSE stream with markdown output for one section.
+
+**Request Body:**
+```json
+{
+  "sectionTitle": "currentDrivers",
+  "sectionContent": "- **Club A** striker returned from injury in the last match"
+}
+```
+
+**Response (SSE stream):**
+```text
+event: deepdown.started
+data: {"request_id":"uuid-string","section":"currentDrivers"}
+
+event: deepdown.delta
+data: {"delta":"## Recent developments\n\n"}
+
+event: deepdown.completed
+data: {"request_id":"uuid-string","result":"## Recent developments\n\n..."}
+```
 
 ---
 
@@ -351,11 +380,11 @@ Step 2: Web Search
     │
     ▼
 Step 3: LLM Generation
-    Assemble prompt (system prompt with BAD/GOOD examples + per-section instructions)
-    Stream OpenAI Responses API (8s timeout, temperature 0.2, JSON output)
-    Allow the same streamed call to use OpenAI web search when extra live context is needed
+    Assemble prompt (system prompt + per-section instructions from src/services/llm/prompts.py)
+    Stream OpenAI Responses API (60s timeout, temperature 0.2, strict function tool)
+    Use OpenAI web_search_preview when enabled
     Emit `research.section_delta` SSE events as each section value grows
-    Neutrality enforced by prompt design — no post-generation scanning
+    Neutrality enforced by prompt design and structured output constraints
     │
     ├── SUCCESS → Return sections dict
     │
@@ -377,7 +406,7 @@ Neutrality is enforced entirely through prompt design — no post-generation sca
 
 ### How It Works
 
-The system prompt in `src/services/llm_service.py` instructs the model with:
+The system prompt in `src/services/llm/prompts.py` instructs the model with:
 - **Role framing**: the model understands it is a fact compiler for prediction market traders, not an advisor
 - **BAD/GOOD examples** for each violation category — showing the rewrite, not just listing banned words:
   - Predictive language: `"likely to win"` → `"has won 5 of last 6 matches"`
@@ -396,15 +425,19 @@ Post-generation regex scanning was a symptom fix. A precisely written prompt wit
 
 ## Authentication
 
-### Current: API Key (Shared Secret)
+### Current: API Key (Shared Secret, Intended Contract)
 
-All endpoints except `/health` require an `X-API-Key` header matching the `API_KEY` environment variable.
+The intended API contract is that all endpoints except `/health` require an `X-API-Key` header matching the `API_KEY` environment variable.
 
 ```bash
 curl -H "X-API-Key: your-secret-key" http://localhost:8000/v1/research
 ```
 
-The API key is hashed (SHA-256) and stored as `user_fingerprint` in the research history collection, enabling per-user tracking without storing the raw key.
+`src/core/dependencies.py` contains the validation dependency used for this flow.
+
+Important current-code note: the `/v1/research` route currently has that dependency commented out and injects a placeholder API key inside the handler. The header is still documented here because it is the intended client contract and the dependency should be restored before production use.
+
+The API key value passed into the pipeline is hashed (SHA-256) and stored as `user_fingerprint` in the research history collection, enabling per-user tracking without storing the raw key.
 
 **Generate a strong key:**
 ```bash
@@ -450,7 +483,7 @@ The architecture spec describes a more sophisticated caching strategy:
 
 ## Database Schema
 
-Beanie document models are defined in `src/db/models.py`. Connection lifecycle (`init_db`, `close_db`) and hashing helpers (`make_cache_key`, `user_fingerprint`) are defined in `src/db/__init__.py`.
+Beanie document models are defined in `src/db/models.py`. Connection lifecycle (`init_db`, `close_db`) lives in `src/db/client.py`, and hashing helpers (`make_cache_key`, `user_fingerprint`) live in `src/db/helpers.py`.
 
 ### `research_cache`
 

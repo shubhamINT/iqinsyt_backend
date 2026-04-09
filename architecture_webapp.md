@@ -2,7 +2,7 @@
 
 > **Scope:** This document covers the IQinsyt web app only — a companion website to the Chrome extension. It handles user registration, authentication, subscription management, dashboard, account settings, and the marketing landing page. The Chrome extension is documented separately in `architecture.md`.
 >
-> **Current repository status:** the backend currently implemented in this repository is the research API (`POST /v1/research`) with API-key auth (`X-API-Key`) under `src/` (`src/api`, `src/services`, `src/db`). The JWT auth + billing endpoints in this document are planned target architecture and are documented in `architecture_backend.md`.
+> **Current repository status:** the backend currently implemented in this repository is the research API under `src/` (`src/api`, `src/services`, `src/db`): `POST /v1/research`, `POST /v1/research/deepdown`, and `GET /health`. The research endpoints are SSE streams. The intended client contract uses `X-API-Key`, although the current `/v1/research` route implementation temporarily bypasses request-time API-key validation in code. The JWT auth + billing endpoints in this document are planned target architecture and are documented in `architecture_backend.md`.
 
 ---
 
@@ -102,7 +102,7 @@ IQinsyt is a **neutral AI-powered research utility** delivered as a Chrome exten
 
 Backend alignment note:
 
-- Implemented now: `POST /v1/research` + `GET /health` with `X-API-Key` auth (see `README.md` and `src/api/server.py`).
+- Implemented now: `POST /v1/research` + `POST /v1/research/deepdown` + `GET /health` (research endpoints are SSE streams; see `README.md` and `src/api/server.py`).
 - Planned for web app integration: JWT auth, user profile, auth-code exchange, billing endpoints (see `architecture_backend.md`).
 
 ---

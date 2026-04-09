@@ -16,6 +16,10 @@ It now returns an **SSE stream** (`Content-Type: text/event-stream`) with multip
 
 You must read the response stream incrementally and handle events as they arrive.
 
+There is also a second SSE endpoint for section-level deep dives:
+
+- `POST /v1/research/deepdown`
+
 ## 2. Request Contract
 
 URL:
@@ -38,7 +42,8 @@ Body:
 {
   "eventTitle": "string (1-500 chars)",
   "eventSource": "string (1-253 chars)",
-  "timestamp": 1743638400000
+  "timestamp": 1743638400000,
+  "redo": false
 }
 ```
 
@@ -46,6 +51,8 @@ Notes:
 
 - Use `fetch`, not `EventSource`, because this is a **POST** stream.
 - Keep using `X-API-Key` in frontend for forward compatibility.
+- Current backend note: the handler currently bypasses request-time API-key validation internally, but clients should still send the header because that remains the intended contract.
+- Set `redo: true` when the user explicitly requests a fresh run instead of cached research.
 
 ## 3. Stream Event Contract
 
@@ -152,7 +159,36 @@ Important:
 - HTTP status can still be `200` if stream opened successfully.
 - Use `research.error.status_code` and `research.error.error` for UX and retries.
 
-## 4. TypeScript Types (frontend)
+## 4. DeepDown Stream Contract
+
+Use `POST /v1/research/deepdown` when the user wants an expanded explanation of one already-generated section.
+
+Request body:
+
+```json
+{
+  "sectionTitle": "currentDrivers",
+  "sectionContent": "- **Club A** striker returned from injury in the last match"
+}
+```
+
+Events:
+
+- `deepdown.started`
+- `deepdown.delta`
+- `deepdown.completed`
+- `deepdown.error`
+
+Example completion payload:
+
+```json
+{
+  "request_id": "uuid",
+  "result": "## Recent developments\n\n..."
+}
+```
+
+## 5. TypeScript Types (frontend)
 
 ```ts
 export type ResearchSections = {
@@ -203,9 +239,19 @@ export type ResearchProgressEvent = {
   message: string;
   meta?: Record<string, unknown>;
 };
+
+export type DeepDownRequest = {
+  sectionTitle: string;
+  sectionContent: string;
+};
+
+export type DeepDownCompletedEvent = {
+  request_id: string;
+  result: string;
+};
 ```
 
-## 5. React + Vite Implementation Pattern
+## 6. React + Vite Implementation Pattern
 
 Use a stream reader + SSE parser.
 
