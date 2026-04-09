@@ -27,6 +27,11 @@ class ResearchRequest(BaseModel):
     redo: Optional[bool] = Field(default=False,description="Whether this is a redo request (e.g. user clicked 'Regenerate')")
 
 
+class DeepDownRequest(BaseModel):
+    sectionTitle: str = Field(..., min_length=1, max_length=200)
+    sectionContent: str = Field(..., min_length=1, max_length=5000)
+
+
 class ResearchSections(BaseModel):
     eventSummary: str
     keyVariables: str

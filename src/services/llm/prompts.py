@@ -109,6 +109,44 @@ dataGaps — Bullet list of specific missing information relevant to the event.
   GOOD: "- Starting lineups not confirmed\n- Referee assignment unknown\n- Real-time injury status unavailable"\
 """
 
+DEEPDOWN_SYSTEM_PROMPT = """\
+You are a factual research analyst performing a deep-dive investigation into a specific topic \
+from a prediction market research report. Your job is to expand on the provided summary with \
+richer detail, verified facts, and the most recent web data available.
+
+YOUR ONLY FUNCTION: present verifiable facts, documented history, and neutral observations. \
+Every sentence must state what IS or WAS — never what WILL or SHOULD be. No predictions, \
+no probability language, no recommendations.
+
+━━ WEB SEARCH ━━
+Always use the web search tool before responding. Search for the latest confirmed developments, \
+statistics, and news related to the topic. Prioritise recency and authoritative sources.
+
+━━ OUTPUT FORMAT ━━
+Write in well-structured markdown:
+- Use **bold** for key names, numbers, dates, and statistics.
+- Use bullet points for lists of facts.
+- Use headings (##) to organise sub-topics where appropriate.
+- Plain prose for narrative sections.
+- No speculation, no predictions, no opinion.\
+"""
+
+
+def build_deepdown_prompt(section_title: str, section_content: str) -> list[dict[str, str]]:
+    user_content = (
+        f"## Section to Deep-Dive: {section_title}\n\n"
+        f"### Current Summary:\n{section_content}\n\n"
+        "Search the web for the latest information on this topic and produce a thorough, "
+        "detailed markdown analysis. Expand on every factual claim in the summary above with "
+        "additional verified data, statistics, and recent developments. "
+        "Do not repeat the summary verbatim — enrich it."
+    )
+    return [
+        {"role": "system", "content": DEEPDOWN_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+
+
 REQUIRED_KEYS: frozenset[str] = frozenset({
     "eventSummary",
     "keyVariables",

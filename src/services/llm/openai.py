@@ -428,3 +428,72 @@ async def call_llm(
             request_id,
         )
         return None
+
+
+TextDeltaCallback = Callable[[str], Awaitable[None]]
+
+DEEPDOWN_TIMEOUT_SECONDS = 90.0
+
+
+async def call_llm_text(
+    messages: list[dict[str, Any]],
+    client: AsyncOpenAI | None = None,
+    request_id: str = "",
+    text_callback: TextDeltaCallback | None = None,
+) -> str | None:
+    """Calls the LLM with only the web search tool and streams plain-text output.
+
+    Returns the full accumulated text, or None on failure.
+    """
+    if client is None:
+        client = _get_openai_client()
+
+    instructions, input_payload = _messages_to_responses_payload(messages)
+
+    tools: list[dict[str, Any]] = []
+    web_search_tool = _build_web_search_tool()
+    if web_search_tool is not None:
+        tools.append(web_search_tool)
+
+    try:
+        text_chunks: list[str] = []
+        final_response: Any = None
+
+        async with asyncio.timeout(DEEPDOWN_TIMEOUT_SECONDS):
+            async with client.responses.stream(
+                model=MODEL,
+                input=input_payload,
+                instructions=instructions,
+                temperature=0.3,
+                max_output_tokens=3000,
+                tools=tools if tools else None,
+            ) as stream:
+                async for event in stream:
+                    if event.type == "response.output_text.delta":
+                        text_chunks.append(event.delta)
+                        if text_callback is not None:
+                            await text_callback(event.delta)
+
+                final_response = await stream.get_final_response()
+
+        content = "".join(text_chunks).strip()
+        if not content and final_response is not None:
+            content = _extract_text_from_final_response(final_response)
+
+        if not content:
+            logger.warning("LLM text stream produced no content (request_id=%s)", request_id)
+            return None
+
+        return content
+
+    except TimeoutError:
+        logger.warning("LLM text call timed out (request_id=%s)", request_id)
+        return None
+    except Exception as exc:
+        logger.warning(
+            "LLM text call failed: %s: %s (request_id=%s)",
+            type(exc).__name__,
+            exc,
+            request_id,
+        )
+        return None
