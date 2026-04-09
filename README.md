@@ -269,6 +269,17 @@ data: {"request_id":"uuid-string","stage":"cache.lookup.started","message":"Chec
 
 ...
 
+event: research.section_delta
+data: {
+  "request_id":"uuid-string",
+  "section":"eventSummary",
+  "delta":"A UEFA Champions League final ",
+  "content":"A UEFA Champions League final ",
+  "done":false
+}
+
+...
+
 event: research.completed
 data: {
   "success": true,
@@ -342,6 +353,8 @@ Step 2: Web Search
 Step 3: LLM Generation
     Assemble prompt (system prompt with BAD/GOOD examples + per-section instructions)
     Stream OpenAI Responses API (8s timeout, temperature 0.2, JSON output)
+    Allow the same streamed call to use OpenAI web search when extra live context is needed
+    Emit `research.section_delta` SSE events as each section value grows
     Neutrality enforced by prompt design — no post-generation scanning
     │
     ├── SUCCESS → Return sections dict

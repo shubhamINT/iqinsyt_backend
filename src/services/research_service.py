@@ -14,6 +14,7 @@ from src.services.search.service import gather_search_context
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+SectionDeltaCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 async def _emit_progress(
@@ -35,7 +36,9 @@ async def run_research_pipeline(
     api_key: str,
     request_id: str,
     progress_callback: ProgressCallback | None = None,
+    section_callback: SectionDeltaCallback | None = None,
 ) -> dict[str, Any]:
+    
     fingerprint = user_fingerprint(api_key)
 
     # ── Step 1: Cache lookup ────────────────────────────────────────────────
@@ -44,7 +47,7 @@ async def run_research_pipeline(
         stage="cache.lookup.started",
         message="Checking cache for existing research",
     )
-    cached = await get_cached_research(body.eventTitle)
+    cached = None if body.redo else await get_cached_research(body.eventTitle)
     if cached:
         logger.info("Cache HIT for %r (request_id=%s)", body.eventTitle, request_id)
         await _emit_progress(
@@ -97,7 +100,8 @@ async def run_research_pipeline(
         message="Gathering external web context",
     )
     context_text, data_retrieval_available = await gather_search_context(
-        body.eventTitle, request_id
+        body.eventTitle,
+        request_id,
     )
     await _emit_progress(
         progress_callback,
@@ -121,6 +125,7 @@ async def run_research_pipeline(
         event_source=body.eventSource,
         research_context=context_text,
         request_id=request_id,
+        section_callback=section_callback,
     )
     if sections_dict is None:
         await _emit_progress(

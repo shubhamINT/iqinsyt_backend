@@ -24,6 +24,7 @@ class ResearchRequest(BaseModel):
     eventTitle: str = Field(min_length=1, max_length=500)
     eventSource: str = Field(min_length=1, max_length=253)
     timestamp: int = Field(description="Unix milliseconds from the extension")
+    redo: Optional[bool] = Field(default=False,description="Whether this is a redo request (e.g. user clicked 'Regenerate')")
 
 
 class ResearchSections(BaseModel):

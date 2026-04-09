@@ -60,6 +60,9 @@ async def create_research(
         async def progress_callback(payload: dict[str, Any]) -> None:
             await queue.put(("progress", payload))
 
+        async def section_callback(payload: dict[str, Any]) -> None:
+            await queue.put(("section_delta", payload))
+
         async def worker() -> None:
             try:
                 api_key = "123"  # Hard coded for now
@@ -68,6 +71,7 @@ async def create_research(
                     api_key,
                     request_id,
                     progress_callback=progress_callback,
+                    section_callback=section_callback,
                 )
                 await queue.put(("result", result))
             except Exception as exc:
@@ -91,6 +95,11 @@ async def create_research(
                 if event_type == "progress":
                     progress_data = {"request_id": request_id, **payload}
                     yield _sse_event("research.progress", progress_data)
+                    continue
+
+                if event_type == "section_delta":
+                    delta_data = {"request_id": request_id, **payload}
+                    yield _sse_event("research.section_delta", delta_data)
                     continue
 
                 if event_type == "result":

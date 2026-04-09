@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     MONGODB_DB_NAME: str = "iqinsyt"
     API_KEY: str = "dev-key-change-me"
     OPENAI_API_KEY: str = ""
+    OPENAI_WEB_SEARCH_ENABLED: bool = True
     BRAVE_API_KEY: str = ""
     SEARXNG_BASE_URL: str = ""
     APP_VERSION: str = "0.1.0"

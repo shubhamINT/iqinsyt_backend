@@ -9,7 +9,7 @@ from src.services.search.searxng import searxng_search
 logger = logging.getLogger(__name__)
 
 MAX_CONTEXT_RESULTS = 6
-MAX_CONTEXT_CHARS = 9000  # ~2,250 tokens, well within LLM window
+MAX_CONTEXT_CHARS = 9000
 
 
 async def gather_search_context(
@@ -44,7 +44,6 @@ async def gather_search_context(
             ]
         )
 
-    # Deduplicate by URL, preserve order
     seen_urls: set[str] = set()
     unique_results: list[dict[str, str]] = []
     for results in results_per_query:
@@ -69,8 +68,6 @@ async def gather_search_context(
         lines.append(f"[{index}] {title}\n{url}\n{description}")
 
     context_text = "\n\n".join(lines)
-
-    # Cap context length to avoid token overflow
     if len(context_text) > MAX_CONTEXT_CHARS:
         context_text = context_text[:MAX_CONTEXT_CHARS]
 

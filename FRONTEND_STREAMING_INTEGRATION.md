@@ -10,6 +10,7 @@ It now returns an **SSE stream** (`Content-Type: text/event-stream`) with multip
 
 - `research.started`
 - `research.progress`
+- `research.section_delta`
 - `research.completed`
 - `research.error`
 
@@ -82,6 +83,27 @@ data: <json>
 ```
 
 `meta` is optional and depends on stage.
+
+### `research.section_delta`
+
+Incremental section content emitted while the LLM is still producing the final JSON object:
+
+```json
+{
+  "request_id": "uuid",
+  "section": "eventSummary",
+  "delta": "A UEFA Champions League final ",
+  "content": "A UEFA Champions League final ",
+  "done": false
+}
+```
+
+Notes:
+
+- `section` is one of the 7 `ResearchSections` keys.
+- `delta` is the newest text segment for that section.
+- `content` is the authoritative accumulated content for that section so the UI can safely replace instead of append if needed.
+- `done` becomes `true` once that section's JSON string is fully closed.
 
 ### `research.completed`
 
@@ -158,6 +180,14 @@ export type ResearchCompletedEvent = {
   timestamp: string;
 };
 
+export type ResearchSectionDeltaEvent = {
+  request_id: string;
+  section: keyof ResearchSections;
+  delta: string;
+  content: string;
+  done: boolean;
+};
+
 export type ResearchErrorEvent = {
   success: false;
   error: string;
@@ -188,6 +218,7 @@ export async function streamResearch(params: {
   signal?: AbortSignal;
   onStarted?: (payload: any) => void;
   onProgress?: (payload: any) => void;
+  onSectionDelta?: (payload: any) => void;
   onCompleted?: (payload: any) => void;
   onErrorEvent?: (payload: any) => void;
 }) {
@@ -235,6 +266,7 @@ export async function streamResearch(params: {
 
     if (eventName === "research.started") params.onStarted?.(payload);
     if (eventName === "research.progress") params.onProgress?.(payload);
+    if (eventName === "research.section_delta") params.onSectionDelta?.(payload);
     if (eventName === "research.completed") params.onCompleted?.(payload);
     if (eventName === "research.error") params.onErrorEvent?.(payload);
   };
@@ -271,6 +303,7 @@ Recommended behavior:
 - On request start: set `connecting`.
 - On `research.started`: set `streaming` and show initial status.
 - On each `research.progress`: update a status line/timeline immediately.
+- On each `research.section_delta`: update the in-progress section from `content`.
 - On `research.completed`: render sections and set `completed`.
 - On `research.error`: show error message + retry CTA and set `error`.
 
@@ -290,6 +323,7 @@ Current stages in order:
 | `search.started` | `research.progress` | Web search begins |
 | `search.completed` | `research.progress` | Web search done (check `meta.data_retrieval_available`) |
 | `llm.started` | `research.progress` | LLM generation begins |
+| section text growth | `research.section_delta` | Partial text for one section |
 | `llm.completed` | `research.progress` | LLM returned valid sections |
 | `llm.unavailable` | `research.progress` | LLM failed — stream ends with `research.error` |
 | `persist.started` | `research.progress` | Cache + history write begins |
@@ -327,6 +361,7 @@ Retry strategy:
 - Replace old JSON `await res.json()` flow for `/v1/research`.
 - Add SSE stream parser in frontend data layer.
 - Update component state to consume progress events.
+- Render partial section text from `research.section_delta.content`.
 - Render final data only from `research.completed`.
 - Render stream errors from `research.error`.
 - Add cancel support with `AbortController`.
